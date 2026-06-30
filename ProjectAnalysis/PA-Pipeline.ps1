@@ -83,16 +83,19 @@ $script:StageRunActive    = $false
 $script:CurrentProcess    = $null
 
 # Stage definitions in pipeline order (matches the Tab 2 checklist / Run All order)
+# Description is one-line summary text shown in the Tab 2 grid only — pulled
+# from each script's own module docstring, not part of the project_config.json
+# schema (so it carries no Merge-ConfigDefaults / BuildConfigJson parity concern).
 $script:Stages = @(
-    @{Code='C'; Script='extract_snapshots.py';    Name='Data Extraction'},
-    @{Code='D'; Script='resolve_wbs.py';           Name='WBS Resolver'},
-    @{Code='E'; Script='construction_variance.py'; Name='Construction Variance'},
-    @{Code='F'; Script='critical_path.py';         Name='Critical Path Ledger'},
-    @{Code='G'; Script='forward_look.py';          Name='Forward Look'},
-    @{Code='H'; Script='buyout_analysis.py';       Name='Buyout Analysis'},
-    @{Code='K'; Script='generate_charts.py';       Name='Charting'},
-    @{Code='L'; Script='assemble_pdf.py';          Name='PDF Assembly'},
-    @{Code='M'; Script='run_qc.py';                Name='Quality Control'}
+    @{Code='C'; Script='extract_snapshots.py';    Name='Data Extraction';       Description='Parses MS Project XML snapshots into structured parquet data'},
+    @{Code='D'; Script='resolve_wbs.py';           Name='WBS Resolver';          Description='Resolves the buyout WBS structure and groups packages by trade'},
+    @{Code='E'; Script='construction_variance.py'; Name='Construction Variance'; Description='Rolls up construction schedule variance by bucket and trade'},
+    @{Code='F'; Script='critical_path.py';         Name='Critical Path Ledger';  Description='Builds a week-by-week delay ledger from the driving path'},
+    @{Code='G'; Script='forward_look.py';          Name='Forward Look';          Description='Building turnover, float health, and path-to-completion look-ahead'},
+    @{Code='H'; Script='buyout_analysis.py';       Name='Buyout Analysis';       Description='Procurement and subcontracting workflow variance by package'},
+    @{Code='K'; Script='generate_charts.py';       Name='Charting';              Description="Generates the brief's charts and an editable chart data workbook"},
+    @{Code='L'; Script='assemble_pdf.py';          Name='PDF Assembly';          Description='Assembles the cover, TOC, and body into the final brief PDF'},
+    @{Code='M'; Script='run_qc.py';                Name='Quality Control';       Description='Mechanical QC checks plus optional Opus narrative synthesis'}
 )
 
 # pip package name -> python import name, only where they differ
@@ -982,16 +985,23 @@ $colRun.Name = 'Run'; $colRun.HeaderText = 'Run?'; $colRun.FillWeight = 40
 $dgvStages.Columns.Add($colRun) | Out-Null
 
 foreach ($col in @(
-    @{Name='Code';   Header='Stage';    FillW=50},
-    @{Name='Name';   Header='Name';     FillW=220},
-    @{Name='Status'; Header='Status';   FillW=120},
-    @{Name='LastRun';Header='Last Run'; FillW=160}
+    @{Name='Code';        Header='Stage';       FillW=50},
+    @{Name='Name';        Header='Name';        FillW=170},
+    @{Name='Description'; Header='Description'; FillW=330},
+    @{Name='Status';      Header='Status';      FillW=120},
+    @{Name='LastRun';     Header='Last Run';    FillW=160}
 )) {
     $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
     $c.Name = $col.Name; $c.HeaderText = $col.Header
     $c.FillWeight = $col.FillW; $c.ReadOnly = $true
     $dgvStages.Columns.Add($c) | Out-Null
 }
+# Description text wraps and the row grows to fit, rather than silently
+# truncating at a guessed pixel width (the grid is Fill-sized, so its
+# columns - and therefore how much a description can fit on one line -
+# change with the window/form size).
+$dgvStages.Columns['Description'].DefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::True
+$dgvStages.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::AllCellsExceptHeaders
 $tabStages.Controls.Add($dgvStages)
 
 $dgvStages.Add_CurrentCellDirtyStateChanged({
@@ -1154,7 +1164,7 @@ function Refresh-StagesGrid {
         if ($null -ne $script:Config) { $lastRun = [string]$script:Config.pipeline_state.($stage.Code).last_run }
         $wasChecked = $true
         if ($checkedCodes.ContainsKey($stage.Code)) { $wasChecked = $checkedCodes[$stage.Code] }
-        $rowIdx = $dgvStages.Rows.Add($wasChecked, $stage.Code, $stage.Name, $glyph.Text, $lastRun)
+        $rowIdx = $dgvStages.Rows.Add($wasChecked, $stage.Code, $stage.Name, $stage.Description, $glyph.Text, $lastRun)
         $dgvStages.Rows[$rowIdx].Cells['Status'].Style.ForeColor = $glyph.Color
         $dgvStages.Rows[$rowIdx].Cells['Status'].Style.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
     }

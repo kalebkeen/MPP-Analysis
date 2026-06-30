@@ -263,7 +263,14 @@ def build_grouping(tasks_df: pd.DataFrame, cfg: dict):
             "is_lead_time": (section == "Lead Time"),
         })
 
-    grouping_df = pd.DataFrame(grouping_rows)
+    # Explicit columns so a project with zero matching buyout leaves still
+    # produces a correctly-shaped (empty) frame instead of a columnless one —
+    # pd.DataFrame([]) drops all columns, which breaks every downstream
+    # merge/access in Stage H (KeyError: 'uid') the moment a project has no
+    # buyout scope at all.
+    grouping_cols = ["uid", "section", "group", "phase", "category",
+                      "sub_category", "activity", "package_uid", "is_lead_time"]
+    grouping_df = pd.DataFrame(grouping_rows, columns=grouping_cols)
 
     # ── Structural package set (independent of leaf resolution) ───────────
     # A package is a summary whose parent is a group/phase node and which is
@@ -289,7 +296,8 @@ def build_grouping(tasks_df: pd.DataFrame, cfg: dict):
                 "phase":        first["phase"],
                 "leaf_count":   len(grp),
             })
-    packages_df = pd.DataFrame(pkg_rows)
+    packages_cols = ["package_uid", "package_name", "section", "group", "phase", "leaf_count"]
+    packages_df = pd.DataFrame(pkg_rows, columns=packages_cols)
 
     # ── Bucket distribution (Section x Group) ─────────────────────────────
     bucket_dist = {}

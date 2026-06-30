@@ -202,7 +202,14 @@ def build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg):
             "actual_start": astart,
             "actual_finish": afinish,
         })
-    pkg = pd.DataFrame(pkg_rows)
+    # Explicit columns: pkg_rows is empty whenever the project has no buyout
+    # scope at all (Stage D resolves zero packages). pd.DataFrame([]) would
+    # drop every column, and pkg["section"]/pkg["group"]/sort_values("abs_var")
+    # below are not guarded by an .empty check, so they'd raise KeyError.
+    pkg_cols = ["package_uid", "section", "group", "phase", "category",
+                "sub_categories", "activities", "baseline", "actual", "abs_var",
+                "pct_var", "actual_start", "actual_finish"]
+    pkg = pd.DataFrame(pkg_rows, columns=pkg_cols)
 
     # ── bucket summary (Section × Group): SUM of package spans ────────────
     bucket_rows = []

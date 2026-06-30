@@ -166,7 +166,16 @@ def build_turnover(tasks_df: pd.DataFrame, cfg: dict):
             "slip_days":       slip,
             "status":          status_from_pct(pct, complete_thresh),
         })
-    df = pd.DataFrame(rows)
+    # Explicit columns so a project where NO configured building name matches
+    # a schedule summary task (rows stays empty) still produces a correctly
+    # shaped frame. pd.DataFrame([]) drops all columns, and this frame is
+    # written to parquet unconditionally in main() — Stage K's
+    # _data_building_lollipop then reads it back and does
+    # df["baseline_finish"].notna(), which raised KeyError on the columnless
+    # version.
+    turnover_cols = ["building", "phase", "pct_complete", "baseline_finish",
+                      "forecast_finish", "slip_days", "status"]
+    df = pd.DataFrame(rows, columns=turnover_cols)
     return df, missing
 
 
