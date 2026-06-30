@@ -262,16 +262,21 @@ function Get-DefaultConfig {
         # Output markers below match the filenames the scripts actually write.
         # Stage L's PDF is named dynamically, so its marker is a wildcard.
         pipeline_state = [ordered]@{
-            C = [ordered]@{ last_run=''; status='never'; output_marker='stage_c/extraction_report.json'     }
-            D = [ordered]@{ last_run=''; status='never'; output_marker='stage_d/resolver_report.json'        }
-            E = [ordered]@{ last_run=''; status='never'; output_marker='stage_e/bucket_summary.parquet'      }
-            F = [ordered]@{ last_run=''; status='never'; output_marker='stage_f/delay_ledger_report.json'    }
-            G = [ordered]@{ last_run=''; status='never'; output_marker='stage_g/forward_report.json'         }
-            H = [ordered]@{ last_run=''; status='never'; output_marker='stage_h/buyout_summary.parquet'      }
-            K = [ordered]@{ last_run=''; status='never'; output_marker='stage_k/forecast_trend.png'; output_marker2='stage_k/chart_data_workbook.xlsx' }
-            J = [ordered]@{ last_run=''; status='never'; output_marker='stage_j/narrative.json'              }
-            L = [ordered]@{ last_run=''; status='never'; output_marker='stage_l/*_Executive_Brief_*.pdf'     }
-            M = [ordered]@{ last_run=''; status='never'; output_marker='stage_m/qc_report.json'              }
+            # output_marker2 present (even if blank) on every stage, not just K - under
+            # Set-StrictMode -Version Latest, dot-accessing a hashtable key that doesn't
+            # exist AT ALL throws ("cannot be found on this object"), unlike a key that
+            # exists with an empty value. Get-StageStatusText reads .output_marker2 on
+            # every stage every time it's called, so every stage needs the key present.
+            C = [ordered]@{ last_run=''; status='never'; output_marker='stage_c/extraction_report.json';   output_marker2='' }
+            D = [ordered]@{ last_run=''; status='never'; output_marker='stage_d/resolver_report.json';     output_marker2='' }
+            E = [ordered]@{ last_run=''; status='never'; output_marker='stage_e/bucket_summary.parquet';   output_marker2='' }
+            F = [ordered]@{ last_run=''; status='never'; output_marker='stage_f/delay_ledger_report.json'; output_marker2='' }
+            G = [ordered]@{ last_run=''; status='never'; output_marker='stage_g/forward_report.json';      output_marker2='' }
+            H = [ordered]@{ last_run=''; status='never'; output_marker='stage_h/buyout_summary.parquet';   output_marker2='' }
+            K = [ordered]@{ last_run=''; status='never'; output_marker='stage_k/forecast_trend.png';       output_marker2='stage_k/chart_data_workbook.xlsx' }
+            J = [ordered]@{ last_run=''; status='never'; output_marker='stage_j/narrative.json';           output_marker2='' }
+            L = [ordered]@{ last_run=''; status='never'; output_marker='stage_l/*_Executive_Brief_*.pdf';  output_marker2='' }
+            M = [ordered]@{ last_run=''; status='never'; output_marker='stage_m/qc_report.json';           output_marker2='' }
         }
     }
 }
