@@ -1708,6 +1708,18 @@ function Refresh-SettingsFromConfig {
         $tbSystemPython.Text = [string]$script:Config.paths.system_python_exe
     }
     $tbJavaHome.Text = [string]$script:Config.environment.java_home
+    if ($tbJavaHome.Text.Trim() -eq '') {
+        # Same fallback Get-DefaultConfig itself uses for a brand-new config.
+        # Needed here too because an app installed BEFORE Java bundling
+        # existed has java_home already saved as "" in its config file -
+        # Merge-ConfigDefaults only backfills keys that are entirely
+        # missing, not ones that exist with a now-stale blank value, so a
+        # pre-bundling config would otherwise never pick up the bundled
+        # runtime even after reinstalling. Save Config persists this back
+        # to disk via the existing environment.java_home write below, so
+        # one Save Config (or any stage run, which saves first) heals it.
+        $tbJavaHome.Text = Join-Path $script:AppRoot 'java-runtime'
+    }
 }
 
 $btnCreateVenv.Add_Click({
