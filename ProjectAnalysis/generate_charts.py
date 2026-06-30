@@ -79,15 +79,28 @@ def register_fonts():
             fm.fontManager.addfont(str(p))
             registered = True
     if not registered:
-        print("  NOTE: Carlito not found; using Calibri/DejaVu Sans fallback.")
+        print("  NOTE: Carlito not found; using Arial/DejaVu Sans fallback.")
     # Use a sans-serif fallback CHAIN rather than a single family name. Setting
     # font.family to a specific missing font (e.g. "Liberation Sans", which is
     # not present on stock Windows) makes matplotlib emit a "findfont: Font
     # family not found" warning for EVERY text element drawn - hundreds per run.
     # A chain ending in DejaVu Sans (always bundled with matplotlib) resolves
-    # silently: Carlito if registered, else Calibri on Windows, else DejaVu Sans.
+    # silently: Carlito if registered, else Arial on Windows, else DejaVu Sans.
+    #
+    # Calibri is deliberately NOT in this chain. Verified bug, reproduced in
+    # isolation: at the non-default DPI this module renders at (figure.dpi /
+    # savefig.dpi = 150 below), matplotlib's Agg/FreeType text path silently
+    # corrupts ONLY ax.legend() text when the resolved font is Calibri - every
+    # legend entry collapses to literally "ti" (title/axis-label/tick text on
+    # the same figure render correctly; the in-memory Text objects still hold
+    # the full correct string even after the corrupted save). Reproduced with
+    # Calibri at dpi 120/150, not at the matplotlib default of 100. Confirmed
+    # NOT a labeling bug in this file: passing an explicit FontProperties to
+    # legend(), or forcing an extra fig.canvas.draw() before savefig(), does
+    # not fix it. Arial and DejaVu Sans do not exhibit the bug at the same
+    # dpi, so Arial replaces Calibri as the practical Windows fallback.
     plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = ["Carlito", "Calibri", "Liberation Sans", "DejaVu Sans", "Arial"]
+    plt.rcParams["font.sans-serif"] = ["Carlito", "Arial", "Liberation Sans", "DejaVu Sans"]
     plt.rcParams.update({
         "font.size": 10,
         "axes.titlesize": 13,
