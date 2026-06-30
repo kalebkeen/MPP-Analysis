@@ -253,7 +253,15 @@ function Get-DefaultConfig {
             venv_python_version = ''
             packages_installed  = $false
             last_env_check      = ''
-            java_home           = ''
+            # Defaults to the JRE bundled by the installer, same rationale as
+            # paths.system_python_exe: a PATH-resolved "java" is unreliable when
+            # multiple JVMs are installed (auto-detection has already been shown
+            # to pick a 32-bit one over a working 64-bit one on this exact app).
+            # Unlike python_exe, this field has no other competing meaning
+            # elsewhere, so it doubles as both the bundled default and the
+            # advanced override - editing it on the Settings tab and saving
+            # just overwrites it, same as it already worked before bundling.
+            java_home           = Join-Path $script:AppRoot 'java-runtime'
             pip_packages = @(
                 'mpxj','jpype1','pandas','pyarrow','openpyxl',
                 'matplotlib','reportlab','pypdf','pikepdf','pdfplumber'
@@ -785,6 +793,11 @@ function Save-ConfigFromUI {
     if ($null -eq $script:Config) { $script:Config = Get-DefaultConfig }
 
     $script:Config.environment.java_home = $tbJavaHome.Text.Trim()
+    # Persist the Bootstrap Python field too - without this, an override typed
+    # on the Settings tab only ever lived in the textbox for the current
+    # session and silently reverted to the installer-bundled path on next
+    # launch (the textbox is auto-repopulated from config on every refresh).
+    $script:Config.paths.system_python_exe = $tbSystemPython.Text.Trim()
 
     $script:Config.project.name                 = $tbProjName.Text.Trim()
     $script:Config.project.sci_project_number   = $tbSciNumber.Text.Trim()
@@ -1566,7 +1579,7 @@ $tbJavaHome = New-Textbox 166 64 700
 $gbSystemPython.Controls.Add($tbJavaHome)
 $btnBrowseJavaHome = New-Btn 'Browse…' 874 62 120 28
 $gbSystemPython.Controls.Add($btnBrowseJavaHome)
-$lblJavaHomeHint = New-Label 'Only needed if Stage C picks the wrong JVM when multiple Javas are installed (must be 64-bit, matching the venv python).' 10 90 950 18
+$lblJavaHomeHint = New-Label 'Defaults to the JRE bundled by the installer. Only change this if you need a different JVM (must be 64-bit, matching the venv python).' 10 90 950 18
 $lblJavaHomeHint.ForeColor = [System.Drawing.Color]::Gray
 $lblJavaHomeHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
 $gbSystemPython.Controls.Add($lblJavaHomeHint)
@@ -1816,19 +1829,17 @@ $btnRunEnvCheck.Add_Click({
         }
     }
 
-    # Check 2: Java found (honoring Java Home override if set) and 64-bit.
-    # A 32-bit JVM crashes Stage C with JVMNotSupportedException since the
-    # venv python is always 64-bit - this is easy to have installed
-    # alongside a working 64-bit JVM and never notice until Stage C runs.
+    # Check 2: Java found (Java Home field, which defaults to the bundled JRE)
+    # and 64-bit. A 32-bit JVM crashes Stage C with JVMNotSupportedException
+    # since the venv python is always 64-bit. No PATH-based fallback here -
+    # deliberately, same reasoning as the bootstrap Python check: a
+    # PATH-resolved "java" is exactly the unreliable auto-detection that
+    # used to pick a 32-bit JVM over a working 64-bit one on this machine.
     $javaHomeCfg    = $tbJavaHome.Text.Trim()
     $javaExeToCheck = $null
     if ($javaHomeCfg -ne '' -and (Test-Path -LiteralPath $javaHomeCfg)) {
         $candidate = Join-Path $javaHomeCfg 'bin\java.exe'
         if (Test-Path -LiteralPath $candidate) { $javaExeToCheck = $candidate }
-    }
-    if ($null -eq $javaExeToCheck) {
-        $javaCmd = Get-Command java.exe -ErrorAction SilentlyContinue
-        if ($javaCmd) { $javaExeToCheck = $javaCmd.Source }
     }
     if ($null -ne $javaExeToCheck) {
         try {
@@ -1841,8 +1852,10 @@ $btnRunEnvCheck.Add_Click({
         } catch {
             [void]$lstEnvResults.Items.Add("✗ Java found but could not run -version: $javaExeToCheck")
         }
+    } elseif ($javaHomeCfg -eq '') {
+        [void]$lstEnvResults.Items.Add('✗ Java Home not set and no bundled runtime found — reinstall the app, or set Java Home above')
     } else {
-        [void]$lstEnvResults.Items.Add('✗ Java not found (required by MPXJ/JPype for Stage C) - set Java Home above or add it to PATH')
+        [void]$lstEnvResults.Items.Add("✗ Java not found at: $javaHomeCfg — reinstall the app, or fix the Java Home path above")
     }
 
     # Check 3: venv exists

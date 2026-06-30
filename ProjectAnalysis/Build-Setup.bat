@@ -10,11 +10,13 @@ if "!SCRIPT_DIR:~-1!"=="\" set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
 set "CS_FILE=!SCRIPT_DIR!\PA-Pipeline-Setup.cs"
 set "OUT_EXE=!SCRIPT_DIR!\PA-Pipeline-Setup.exe"
 set "ICON_PATH="
-:: Bundled CPython installer, embedded as a .NET PE resource (NOT a base64
-:: string constant in the .cs - csc.exe hard-fails on string-literal data
-:: this large with "No logical space left to create more user strings").
-:: Embed-Sources.ps1 copies the file here under this exact name.
+:: Bundled CPython installer and Java runtime, embedded as .NET PE resources
+:: (NOT base64 string constants in the .cs - csc.exe hard-fails on
+:: string-literal data this large with "No logical space left to create
+:: more user strings"). Embed-Sources.ps1 copies both files here under
+:: these exact names.
 set "PYTHON_INSTALLER=!SCRIPT_DIR!\python-3.12.10-amd64.exe"
+set "JAVA_RUNTIME_ZIP=!SCRIPT_DIR!\temurin-21-jre-windows-x64.zip"
 
 cls
 echo.
@@ -86,15 +88,28 @@ if not exist "!PYTHON_INSTALLER!" (
     pause
     exit /b 1
 )
+if not exist "!JAVA_RUNTIME_ZIP!" (
+    echo.
+    echo ERROR: Bundled Java runtime not found.
+    echo        Expected at: !JAVA_RUNTIME_ZIP!
+    echo        Run Embed-Sources.ps1 -JavaRuntimePath ^<path^> first.
+    echo.
+    pause
+    exit /b 1
+)
 set "PY_RESOURCE_ARG=/resource:"!PYTHON_INSTALLER!",PASetup.PythonInstaller.exe"
+set "JAVA_RESOURCE_ARG=/resource:"!JAVA_RUNTIME_ZIP!",PASetup.JavaRuntime.zip"
 
 "!CSC!" /nologo /target:winexe /optimize+ ^
     /r:System.dll ^
     /r:System.Drawing.dll ^
     /r:System.Windows.Forms.dll ^
+    /r:System.IO.Compression.dll ^
+    /r:System.IO.Compression.FileSystem.dll ^
     /out:"!OUT_EXE!" ^
     !ICON_ARG! ^
     !PY_RESOURCE_ARG! ^
+    !JAVA_RESOURCE_ARG! ^
     "!CS_FILE!"
 
 set "COMPILE_RESULT=!ERRORLEVEL!"

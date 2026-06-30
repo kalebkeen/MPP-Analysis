@@ -12,15 +12,15 @@
   step, and this script IS that step. Run this whenever PA-Pipeline.ps1 or a
   stage script changes, before rebuilding the installer.
 
-  The bundled CPython installer (~26MB) is NOT embedded as a base64 string
-  constant like the other files - a real test compile showed csc.exe
-  (v4.0.30319) hard-fails on that much string-literal data with "No logical
-  space left to create more user strings" (the .NET #US metadata heap;
-  splitting into smaller string literals doesn't help, since they all still
-  share that one heap). Instead it's embedded as a .NET PE resource via
-  csc.exe's /resource: flag, wired up directly in Build-Setup.bat - which
-  expects the raw .exe sitting next to PA-Pipeline-Setup.cs under the exact
-  name python-3.12.10-amd64.exe. This script copies it there for you.
+  The bundled CPython installer (~26MB) and Java runtime (~47MB) are NOT
+  embedded as base64 string constants like the other files - a real test
+  compile showed csc.exe (v4.0.30319) hard-fails on that much string-literal
+  data with "No logical space left to create more user strings" (the .NET
+  #US metadata heap; splitting into smaller string literals doesn't help,
+  since they all still share that one heap). Instead both are embedded as
+  .NET PE resources via csc.exe's /resource: flag, wired up directly in
+  Build-Setup.bat - which expects the raw files sitting next to
+  PA-Pipeline-Setup.cs under exact names. This script copies them there.
 
 .PARAMETER PythonInstallerPath
   Path to python-3.12.x-amd64.exe to stage as the bundled runtime. Omit to
@@ -28,25 +28,35 @@
   you've only changed PA-Pipeline.ps1 or a stage script and the embedded
   Python version hasn't changed).
 
+.PARAMETER JavaRuntimePath
+  Path to a Temurin (or other redistribution-licensed) JRE .zip for Windows
+  x64 to stage as the bundled JVM. Omit to leave whatever's already staged
+  untouched. Expects the zip to have ONE top-level folder (as Temurin's
+  does) - the installer moves that folder's contents up at install time, so
+  it doesn't matter what that folder is named.
+
 .EXAMPLE
   .\Embed-Sources.ps1
     Re-embeds PA-Pipeline.ps1 and all 9 stage scripts only.
 
 .EXAMPLE
-  .\Embed-Sources.ps1 -PythonInstallerPath C:\downloads\python-3.12.10-amd64.exe
-    Also stages the bundled Python runtime installer for Build-Setup.bat.
+  .\Embed-Sources.ps1 -PythonInstallerPath C:\downloads\python-3.12.10-amd64.exe -JavaRuntimePath C:\downloads\temurin-21-jre-windows-x64.zip
+    Also stages the bundled Python runtime and Java runtime for Build-Setup.bat.
 #>
 param(
     [string]$SetupPath           = (Join-Path $PSScriptRoot 'PA-Pipeline-Setup.cs'),
     [string]$AppPs1Path          = (Join-Path $PSScriptRoot 'PA-Pipeline.ps1'),
-    [string]$PythonInstallerPath = ''
+    [string]$PythonInstallerPath = '',
+    [string]$JavaRuntimePath     = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
-# Must match Build-Setup.bat's PYTHON_INSTALLER variable and the resource
-# name baked into PA-Pipeline-Setup.cs (Program.GetPythonInstallerBytes).
+# Must match Build-Setup.bat's PYTHON_INSTALLER/JAVA_RUNTIME_ZIP variables and
+# the resource names baked into PA-Pipeline-Setup.cs
+# (Program.GetPythonInstallerBytes / JAVA_RUNTIME_RESOURCE_NAME).
 $PythonInstallerTargetName = 'python-3.12.10-amd64.exe'
+$JavaRuntimeTargetName     = 'temurin-21-jre-windows-x64.zip'
 
 function Get-Base64OfFile {
     param([string]$Path)
@@ -102,4 +112,13 @@ if ($PythonInstallerPath -ne '') {
     Copy-Item -LiteralPath $PythonInstallerPath -Destination $target -Force
 } else {
     Write-Host "No -PythonInstallerPath given - leaving the staged Python installer (if any) untouched."
+}
+
+if ($JavaRuntimePath -ne '') {
+    if (-not (Test-Path -LiteralPath $JavaRuntimePath)) { throw "Java runtime zip not found: $JavaRuntimePath" }
+    $target = Join-Path $PSScriptRoot $JavaRuntimeTargetName
+    Write-Host "Staging bundled Java runtime -> $target"
+    Copy-Item -LiteralPath $JavaRuntimePath -Destination $target -Force
+} else {
+    Write-Host "No -JavaRuntimePath given - leaving the staged Java runtime (if any) untouched."
 }
