@@ -1,0 +1,218 @@
+{
+  // ============================================================
+  // PA Pipeline — project_config.json
+  // Master configuration file. Written by Tab 1 of the app.
+  // Read by all Python stages (C through M) via --config flag.
+  // All paths are absolute. The app writes them on Save Config.
+  // ============================================================
+
+  // ----------------------------------------------------------
+  // SECTION 1 — Project Identity
+  // Written by Tab 1 · Project Setup
+  // ----------------------------------------------------------
+  "project": {
+    "name":               "Harrison Estate Senior",       // Display name — used in PDF cover, xlsx headers, log labels
+    "sci_project_number": "2024-001",                     // SCI internal job number — informational, appears in cover
+    "type":               "multifamily",                  // "multifamily" | "commercial" | "renovation" — may affect future stage behavior
+    "status_date":        "2026-06-12",                   // ISO date — the as-of date for the current analysis run
+    "baseline_date":      "2025-04-09",                   // ISO date — the immovable baseline finish target
+    "contract_type":      "GC"                            // "GC" | "CM" | "design-build" — informational
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 2 — File Paths
+  // Written by Tab 1 · Project Setup
+  // All paths absolute. App resolves relative to install dir
+  // if user enters relative paths (not recommended).
+  // ----------------------------------------------------------
+  "paths": {
+    "snapshots_dir":      "C:\\SCI\\Projects\\Harrison\\Snapshots",   // Folder of weekly MPP/XML exports (Stage C reads here)
+    "baseline_mpp":       "C:\\SCI\\Projects\\Harrison\\Baseline\\Harrison_Baseline.xml", // Baseline-bearing file (Stage E, H read this)
+    "output_dir":         "C:\\SCI\\Projects\\Harrison\\Analysis",    // Root output folder — all stage subdirs created here
+    "venv_dir":           "C:\\Program Files\\PA-Pipeline\\venv",     // Managed venv — written by installer, read-only in config
+    "python_exe":         "C:\\Program Files\\PA-Pipeline\\venv\\Scripts\\python.exe" // Resolved venv python — set by installer
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 3 — Project Structure
+  // Written by Tab 1 · Project Setup
+  // Drives WBS resolver (Stage D), variance buckets (Stage E),
+  // building lollipop chart (Stage K), PDF per-building tables.
+  // ----------------------------------------------------------
+  "structure": {
+    "building_count":     16,
+    "buildings": [
+      // Each entry: internal ID, display label, phase assignment
+      // App generates this list from building_count + naming pattern,
+      // then lets user edit individual labels and phase assignments.
+      { "id": "B01",  "label": "Building 1",   "phase": 1 },
+      { "id": "B02",  "label": "Building 2",   "phase": 1 },
+      { "id": "B03",  "label": "Building 3",   "phase": 1 },
+      { "id": "B04",  "label": "Building 4",   "phase": 1 },
+      { "id": "B05",  "label": "Building 5",   "phase": 2 },
+      { "id": "B06",  "label": "Building 6",   "phase": 2 },
+      { "id": "B07",  "label": "Building 7",   "phase": 2 },
+      { "id": "B08",  "label": "Building 8",   "phase": 2 },
+      { "id": "B09",  "label": "Building 9",   "phase": 3 },
+      { "id": "B10",  "label": "Building 10",  "phase": 3 },
+      { "id": "B11",  "label": "Building 11",  "phase": 3 },
+      { "id": "B12",  "label": "Clubhouse 12", "phase": 3 },
+      { "id": "B13",  "label": "Building 13",  "phase": 4 },
+      { "id": "B14",  "label": "Building 14",  "phase": 4 },
+      { "id": "B15",  "label": "Building 15",  "phase": 4 },
+      { "id": "B16",  "label": "Building 16",  "phase": 4 }
+    ],
+    "phase_count":        4,
+    "wbs_hierarchy":      ["Phase", "Building", "Trade"],  // Ordered WBS level names — Stage D resolver uses this
+    "site_buckets":       ["Mobilize", "Site Work", "Site Concrete", "Site Finish"]  // Non-building buckets — excluded from per-building analysis
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 4 — Stage C · Data Extraction
+  // Controls MPXJ/JPype snapshot parsing behavior.
+  // ----------------------------------------------------------
+  "extraction": {
+    "snapshot_filename_pattern": "*.xml",        // Glob — MPP exports may carry .xml extension
+    "snapshot_date_regex":       "(\\d{8})",     // Regex group capturing YYYYMMDD from filename
+    "snapshot_date_format":      "%Y%m%d",       // strptime format matching the above
+    "uid_persistence_expected":  99.8,           // % — warn in Stage M if below this (Harrison: 99.8%)
+    "java_max_heap_mb":          1024            // JVM heap for MPXJ — increase for very large MPP files
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 5 — Stage E · Construction Variance
+  // Controls span-based variance bucketing and ranking.
+  // ----------------------------------------------------------
+  "construction_variance": {
+    "baseline_span_min_days":    1,              // Lines with baseline span below this → flagged as zero-baseline in Stage M
+    "top_n_overruns":            10,             // Top-N worst overruns shown in executive summary table
+    "variance_warn_threshold_days": 5            // Activities over this slip get highlighted red in xlsx
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 6 — Stage F · Critical Path Ledger
+  // Controls driving-path tracing and concurrency detection.
+  // ----------------------------------------------------------
+  "critical_path": {
+    "incomplete_only":                    true,  // Only trace incomplete construction tasks
+    "concurrent_paths_threshold_days":    3,     // Activities finishing within N days of controller → flagged concurrent
+    "min_duration_days":                  1,     // Tasks shorter than this excluded from driving path consideration
+    "ledger_window_weeks":                4      // Rolling window size for the weekly delay ledger
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 7 — Stage G · Forward Path-to-Completion
+  // Controls turnover sequence and float analysis.
+  // ----------------------------------------------------------
+  "forward_look": {
+    "turnover_sequence":    ["phase", "building"],   // Sort order for projected turnover table
+    "float_bands": [
+      { "label": "Critical",    "max_days": 0  },
+      { "label": "Near-Critical","max_days": 10 },
+      { "label": "Low Float",   "max_days": 20 },
+      { "label": "Adequate",    "max_days": 999 }
+    ],
+    "completion_range_confidence": [10, 50, 90]     // Percentile bands for completion date range estimate
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 8 — Stage H · Buyout Phase Analysis
+  // Controls package classifier and output table sizing.
+  // ----------------------------------------------------------
+  "buyout_analysis": {
+    "stage_classification": [
+      "Order/Procurement",
+      "Subcontract Award",
+      "Submittal/Approval",
+      "Lead-Time/Delivery",
+      "Milestone",
+      "Other"
+    ],                                            // Priority-ordered — first match wins
+    "stage_fallback":         "Other",            // Assigned when no keyword matches
+    "top_packages_count":     25,                 // Rows in Top Packages sheet
+    "summary_span_metric":    "summary_task"      // "summary_task" (correct) vs "leaf_sum" (inflated — do not use)
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 9 — Stage K · Charting
+  // Controls chart appearance and annotation behavior.
+  // ----------------------------------------------------------
+  "charting": {
+    "dpi":                    150,               // Output resolution for all PNGs
+    "font_family":            "Carlito",         // Primary chart font — fallback to Calibri if unavailable
+    "navy_hex":               "#1F4E78",         // Primary brand color
+    "alert_red_hex":          "#C00000",         // Used for Critical float band, negative variance
+    "forecast_trend_chart": {
+      "annotation_breakpoints": []               // List of {week, label} dicts — app lets user add these in Tab 2
+    }
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 10 — Stage L · PDF Assembly
+  // Controls cover page text, TOC defaults, and layout.
+  // ----------------------------------------------------------
+  "pdf_assembly": {
+    "brief_title":            "Executive Schedule Brief",
+    "brief_subtitle":         "Harrison Estate Senior  |  Schedule Analytics",
+    "company_name":           "SCI",
+    "report_date":            "",                // Leave blank — app auto-fills from project.status_date on run
+    "cover_toc_page_offset":  2,                 // Pages before body begins (cover=1, TOC=1) — affects "Page N of X"
+    "font_family":            "Carlito",
+    "toc_page_overrides": {}                     // Optional: {"Part I": 3, "Part II": 6, ...} — overrides auto-detected TOC page numbers
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 11 — Stage M · Quality Control
+  // Controls QC thresholds and Opus synthesis behavior.
+  // ----------------------------------------------------------
+  "qc": {
+    "uid_persistence_warn_threshold_pct":  99.0, // % UID survival across snapshots — warn if below
+    "zero_baseline_warn_threshold":        50,   // Count of zero-baseline lines before QC flags
+    "name_uid_gap_warn_pct":               1.0,  // % gap between name-based and UID-based variance — warn if above
+    "negative_variance_watch_buildings":   [],   // Pre-populated by Stage M first run — e.g. ["B05","B08"]
+    "synthesize_with_opus":                false // True = Stage M calls Opus for synthesis paragraphs (--synthesize flag)
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 12 — Environment (written by installer, not Tab 1)
+  // Read by Tab 5 · Settings for display and validation.
+  // Do not edit manually.
+  // ----------------------------------------------------------
+  "environment": {
+    "venv_created":           false,             // Set true by installer after venv creation
+    "venv_python_version":    "",                // e.g. "3.11.9" — set by installer
+    "packages_installed":     false,             // Set true after pip install completes
+    "last_env_check":         "",                // ISO datetime of last Tab 5 environment check
+    "java_home":              "",                // JAVA_HOME override — blank = use system PATH
+    "pip_packages": [
+      "mpxj",
+      "jpype1",
+      "pandas",
+      "pyarrow",
+      "openpyxl",
+      "matplotlib",
+      "reportlab",
+      "pypdf",
+      "pikepdf",
+      "pdfplumber"
+    ]
+  },
+
+  // ----------------------------------------------------------
+  // SECTION 13 — Pipeline State (written by app at runtime)
+  // Tracks last-run status per stage for the Tab 2 status board.
+  // Do not edit manually.
+  // ----------------------------------------------------------
+  "pipeline_state": {
+    "C": { "last_run": "", "status": "never", "output_marker": "stage_c/extraction_report.json" },
+    "D": { "last_run": "", "status": "never", "output_marker": "stage_d/wbs_resolved.parquet"   },
+    "E": { "last_run": "", "status": "never", "output_marker": "stage_e/bucket_summary.parquet" },
+    "F": { "last_run": "", "status": "never", "output_marker": "stage_f/ledger.parquet"         },
+    "G": { "last_run": "", "status": "never", "output_marker": "stage_g/forward_report.json"    },
+    "H": { "last_run": "", "status": "never", "output_marker": "stage_h/buyout_summary.xlsx"    },
+    "K": { "last_run": "", "status": "never", "output_marker": "stage_k/forecast_trend.png"     },
+    "J": { "last_run": "", "status": "never", "output_marker": "stage_j/narrative.json"         },
+    "L": { "last_run": "", "status": "never", "output_marker": "stage_l/executive_brief.pdf"    },
+    "M": { "last_run": "", "status": "never", "output_marker": "stage_m/qc_report.json"         }
+  }
+}
