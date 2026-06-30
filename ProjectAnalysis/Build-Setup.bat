@@ -10,6 +10,11 @@ if "!SCRIPT_DIR:~-1!"=="\" set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
 set "CS_FILE=!SCRIPT_DIR!\PA-Pipeline-Setup.cs"
 set "OUT_EXE=!SCRIPT_DIR!\PA-Pipeline-Setup.exe"
 set "ICON_PATH="
+:: Bundled CPython installer, embedded as a .NET PE resource (NOT a base64
+:: string constant in the .cs - csc.exe hard-fails on string-literal data
+:: this large with "No logical space left to create more user strings").
+:: Embed-Sources.ps1 copies the file here under this exact name.
+set "PYTHON_INSTALLER=!SCRIPT_DIR!\python-3.12.10-amd64.exe"
 
 cls
 echo.
@@ -72,12 +77,24 @@ if not "!ICON_PATH!"=="" (
     )
 )
 
+if not exist "!PYTHON_INSTALLER!" (
+    echo.
+    echo ERROR: Bundled Python installer not found.
+    echo        Expected at: !PYTHON_INSTALLER!
+    echo        Run Embed-Sources.ps1 -PythonInstallerPath ^<path^> first.
+    echo.
+    pause
+    exit /b 1
+)
+set "PY_RESOURCE_ARG=/resource:"!PYTHON_INSTALLER!",PASetup.PythonInstaller.exe"
+
 "!CSC!" /nologo /target:winexe /optimize+ ^
     /r:System.dll ^
     /r:System.Drawing.dll ^
     /r:System.Windows.Forms.dll ^
     /out:"!OUT_EXE!" ^
     !ICON_ARG! ^
+    !PY_RESOURCE_ARG! ^
     "!CS_FILE!"
 
 set "COMPILE_RESULT=!ERRORLEVEL!"

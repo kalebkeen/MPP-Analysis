@@ -161,6 +161,14 @@ function Get-DefaultConfig {
             output_root          = ''
             venv_dir             = $venvDir
             python_exe           = Join-Path $venvDir 'Scripts\python.exe'
+            # Bootstrap interpreter used ONLY to create the venv above (python -m venv).
+            # NOT the same thing as python_exe - that field is, and always has been, the
+            # venv's own interpreter, which is what every pipeline stage actually runs
+            # under. Defaults to the installer-bundled runtime next to the exe so venv
+            # creation never depends on a PATH-resolved "python" (which on a clean
+            # Windows box resolves to the Microsoft Store stub, not a real interpreter -
+            # see the Settings tab hint). Override only for advanced/manual use.
+            system_python_exe    = Join-Path $script:AppRoot 'python-runtime\python.exe'
         }
         schedule = [ordered]@{
             baseline_date                       = (Get-Date).ToString('yyyy-MM-dd')
@@ -260,7 +268,7 @@ function Get-DefaultConfig {
             F = [ordered]@{ last_run=''; status='never'; output_marker='stage_f/delay_ledger_report.json'    }
             G = [ordered]@{ last_run=''; status='never'; output_marker='stage_g/forward_report.json'         }
             H = [ordered]@{ last_run=''; status='never'; output_marker='stage_h/buyout_summary.parquet'      }
-            K = [ordered]@{ last_run=''; status='never'; output_marker='stage_k/forecast_trend.png'          }
+            K = [ordered]@{ last_run=''; status='never'; output_marker='stage_k/forecast_trend.png'; output_marker2='stage_k/chart_data_workbook.xlsx' }
             J = [ordered]@{ last_run=''; status='never'; output_marker='stage_j/narrative.json'              }
             L = [ordered]@{ last_run=''; status='never'; output_marker='stage_l/*_Executive_Brief_*.pdf'     }
             M = [ordered]@{ last_run=''; status='never'; output_marker='stage_m/qc_report.json'              }
@@ -328,6 +336,53 @@ function Save-ProjectConfig {
 }
 
 # =============================================================================
+# HELPER: Remember the last opened/saved config path across launches, so a
+# user working across multiple projects over time doesn't have to re-Load
+# Config every time. Stored separately from project_config.json itself in
+# $script:DataRoot (NOT next to the exe in $script:AppRoot - that location
+# is reserved for the one-time legacy-config migration above and is exactly
+# how an earlier build's decoy config file caused Load Config to silently
+# repoint at a non-writable, wrong-shaped file; see handoff notes).
+# =============================================================================
+$script:LastConfigPointerPath = Join-Path $script:DataRoot 'last_config.txt'
+
+function Get-LastConfigPath {
+    if (-not (Test-Path -LiteralPath $script:LastConfigPointerPath)) { return $null }
+    try {
+        $p = (Get-Content -LiteralPath $script:LastConfigPointerPath -Raw -Encoding UTF8).Trim()
+        if ($p -ne '' -and (Test-Path -LiteralPath $p)) { return $p }
+    } catch { }
+    return $null
+}
+
+function Set-LastConfigPath {
+    param([string]$Path)
+    try { Write-Utf8NoBom -Path $script:LastConfigPointerPath -Content $Path } catch { }
+}
+
+# =============================================================================
+# HELPER: Enable/disable Tabs 2-4 and update the status bar based on whether
+# a real project is currently loaded (vs. blank defaults with nothing ever
+# saved or loaded). References $tabStages/$tabRunLog/$tabOutputs/$lblStatusBar,
+# which don't exist yet at the point this function is defined - that's fine
+# in PowerShell since the body only resolves them when actually called, and
+# every call site below runs after the full UI is built.
+# =============================================================================
+$script:ProjectLoaded = $false
+
+function Set-ProjectLoadedState {
+    param([bool]$Loaded)
+    $script:ProjectLoaded = $Loaded
+    foreach ($t in @($tabStages, $tabRunLog, $tabOutputs)) {
+        if ($null -ne $t) { $t.Enabled = $Loaded }
+    }
+    if ($null -ne $lblStatusBar) {
+        if ($Loaded) { $lblStatusBar.Text = "Config file: $script:ConfigPath" }
+        else         { $lblStatusBar.Text = 'No project loaded — set up a project on the Project Setup tab or load an existing config.' }
+    }
+}
+
+# =============================================================================
 # HELPER: Folder / file pickers
 # =============================================================================
 function Show-FolderPicker {
@@ -375,6 +430,16 @@ $tabs.Padding = New-Object System.Drawing.Point(14, 4)
 # Add to form FIRST, then set Dock - correct order for PS2EXE
 $form.Controls.Add($tabs)
 $tabs.Dock = [System.Windows.Forms.DockStyle]::Fill
+
+# Status bar: shows the active config path, or a "no project loaded" prompt.
+# Added after $tabs (Dock=Fill) so it claims the bottom strip and $tabs fills
+# whatever remains - the standard WinForms dock-order convention.
+$statusStrip = New-Object System.Windows.Forms.StatusStrip
+$lblStatusBar = New-Object System.Windows.Forms.ToolStripStatusLabel
+$lblStatusBar.Spring = $true
+$lblStatusBar.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+[void]$statusStrip.Items.Add($lblStatusBar)
+$form.Controls.Add($statusStrip)
 
 # helper: standard GroupBox
 function New-GroupBox {
@@ -843,6 +908,8 @@ $btnSaveConfig.Add_Click({
     try {
         Save-ProjectConfig -Path $script:ConfigPath
         $lblConfigPath.Text = "Config file: $script:ConfigPath"
+        Set-LastConfigPath -Path $script:ConfigPath
+        Set-ProjectLoadedState -Loaded $true
         Refresh-StagesGrid
         [System.Windows.Forms.MessageBox]::Show("Saved to:`n$script:ConfigPath",'Save Config',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)
     } catch {
@@ -859,6 +926,8 @@ $btnLoadConfig.Add_Click({
         Refresh-UIFromConfig
         Refresh-StagesGrid
         Refresh-SettingsFromConfig
+        Set-LastConfigPath -Path $picked
+        Set-ProjectLoadedState -Loaded $true
         [System.Windows.Forms.MessageBox]::Show("Loaded:`n$picked",'Load Config',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)
     } catch {
         [System.Windows.Forms.MessageBox]::Show("Could not load config:`n$($_.Exception.Message)",'Error',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)
@@ -925,6 +994,75 @@ $btnRunAll.Font        = New-Object System.Drawing.Font('Segoe UI', 9, [System.D
 $btnRunSynthesize.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
 $pnlStageBtns.Controls.AddRange(@($btnOpenNarrative, $btnRunSelected, $btnRunAll, $btnRunSynthesize))
 
+# =============================================================================
+# HELPER: minimal narrative.json skeleton. Keys are exactly what
+# assemble_pdf.py's narr()/risk_*/status_by_dimension calls read and what
+# run_qc.py's --synthesize merges in (questions_for_next_review, watch_list,
+# data_quality_notes, scope_gaps). methodology_a/b/c are deliberately
+# omitted - assemble_pdf.py already has built-in default text for those -
+# as is toc_overrides, an advanced manual override with a different
+# (list-of-tuples) shape, not part of the basic fill-in-the-blank template.
+# =============================================================================
+function Get-NarrativeTemplateJson {
+    $skeleton = [ordered]@{
+        bottom_line                  = ''
+        executive_overview           = ''
+        part_i_intro                 = ''
+        part_i_trend_analysis        = ''
+        part_i_bucket_analysis       = ''
+        part_ii_intro                = ''
+        part_ii_ledger_analysis      = ''
+        part_iii_intro               = ''
+        part_iii_per_building_note   = ''
+        part_iv_intro                = ''
+        part_vi_bottom_line          = ''
+        part_vi_stage_breakdown_note = ''
+        part_vi_methodology_d_note   = ''
+        appendix_a_note              = ''
+        risk_1                       = ''
+        risk_2                       = ''
+        risk_3                       = ''
+        risk_4                       = ''
+        status_by_dimension          = @()
+        questions_for_next_review    = @()
+        watch_list                   = @()
+        data_quality_notes           = @()
+        scope_gaps                   = @()
+    }
+    return ($skeleton | ConvertTo-Json -Depth 6)
+}
+
+# =============================================================================
+# HELPER: small two-button "Create Empty Template / Cancel" dialog for the
+# Stage J missing-file case. A stock Yes/No MessageBox can't carry these
+# exact button labels, so this is a tiny purpose-built Form instead.
+# =============================================================================
+function Show-CreateTemplateDialog {
+    param([string]$Message)
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = 'Narrative'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.StartPosition   = 'CenterParent'
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.ClientSize      = New-Object System.Drawing.Size(420, 140)
+
+    $lbl = New-Label $Message 16 16 388 76
+    $dlg.Controls.Add($lbl)
+
+    $btnCreate = New-Btn 'Create Empty Template' 100 100 190 30 ([System.Drawing.Color]::FromArgb(20,120,40))
+    $btnCreate.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $dlg.Controls.Add($btnCreate)
+
+    $btnCancel = New-Btn 'Cancel' 304 100 100 30
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnCancel)
+
+    $dlg.AcceptButton = $btnCreate
+    $dlg.CancelButton = $btnCancel
+    return $dlg.ShowDialog()
+}
+
 $btnOpenNarrative.Add_Click({
     if ($null -eq $script:Config -or [string]$script:Config.paths.output_root -eq '') {
         [System.Windows.Forms.MessageBox]::Show('Set an Output Folder on the Project Setup tab first.','Narrative',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -932,8 +1070,17 @@ $btnOpenNarrative.Add_Click({
     }
     $stageJDir = Join-Path $script:Config.paths.output_root 'stage_j'
     $narrPath  = Join-Path $stageJDir 'narrative.json'
+
+    if (Test-Path $narrPath) {
+        Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$narrPath`""
+        return
+    }
+
+    $choice = Show-CreateTemplateDialog -Message 'Narrative file not yet created. This is generated by Stage M''s --synthesize option ("Run Selected + Synthesize"), or you can create it manually.'
+    if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
     if (-not (Test-Path $stageJDir)) { New-Item -ItemType Directory -Path $stageJDir -Force | Out-Null }
-    if (-not (Test-Path $narrPath))  { Write-Utf8NoBom -Path $narrPath -Content '{}' }
+    Write-Utf8NoBom -Path $narrPath -Content (Get-NarrativeTemplateJson)
     Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$narrPath`""
 })
 
@@ -950,7 +1097,17 @@ function Get-StageStatusText {
     if ($outDir -ne '' -and [string]$st.output_marker -ne '') {
         $markerPath = Join-Path $outDir $st.output_marker
         # -Path (not -LiteralPath) so wildcard markers like stage_l/*_Executive_Brief_*.pdf resolve
-        if (Test-Path -Path $markerPath) { return 'success' }
+        $marker1Exists = Test-Path -Path $markerPath
+        # Some stages (K: PNGs + chart_data_workbook.xlsx) need a SECOND marker
+        # present too before counting as success - a chart run that produces
+        # the PNGs but fails partway through the workbook write should not
+        # show green. Generic on purpose: any stage can opt in via output_marker2.
+        $marker2 = [string]$st.output_marker2
+        if ($marker2 -eq '') {
+            if ($marker1Exists) { return 'success' }
+        } elseif ($marker1Exists -and (Test-Path -Path (Join-Path $outDir $marker2))) {
+            return 'success'
+        }
     }
     if ([string]$st.last_run -ne '') { return 'failed' }
     return 'never'
@@ -1381,26 +1538,30 @@ $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(80,80,100)
 $lblVenvActionStatus.AutoEllipsis = $true
 $gbVenv.Controls.Add($lblVenvActionStatus)
 
-# ── System Python / Java ─────────────────────────────────────────────────
-$gbSystemPython = New-GroupBox 'System Python  (used only to create the venv — once the venv exists, all stage runs use the venv python)' 12 194 1000 110
+# ── Bootstrap Python / Java ───────────────────────────────────────────────
+$gbSystemPython = New-GroupBox 'Bootstrap Python  (creates the venv only — once it exists, all stage runs use the venv python)' 12 194 1000 110
 $tabSettings.Controls.Add($gbSystemPython)
 
-$gbSystemPython.Controls.Add((New-Label 'System Python Path:' 10 30 150))
-$tbSystemPython = New-Textbox 166 28 700
+$gbSystemPython.Controls.Add((New-Label 'Bootstrap Python Path:' 10 18 150))
+$tbSystemPython = New-Textbox 166 16 700
 $gbSystemPython.Controls.Add($tbSystemPython)
-$btnBrowseSystemPython = New-Btn 'Browse…' 874 26 120 28
+$btnBrowseSystemPython = New-Btn 'Browse…' 874 14 120 28
 $gbSystemPython.Controls.Add($btnBrowseSystemPython)
 $btnBrowseSystemPython.Add_Click({
-    $picked = Show-OpenFilePicker -Title 'Select system python.exe' -Filter 'python.exe|python.exe|Executable Files (*.exe)|*.exe|All Files (*.*)|*.*' -StartPath 'C:\'
+    $picked = Show-OpenFilePicker -Title 'Select python.exe' -Filter 'python.exe|python.exe|Executable Files (*.exe)|*.exe|All Files (*.*)|*.*' -StartPath 'C:\'
     if ($null -ne $picked -and $picked -ne '') { $tbSystemPython.Text = $picked }
 })
+$lblSystemPythonHint = New-Label 'Defaults to the Python runtime bundled by the installer. Only change this for advanced/manual use - never relies on a PATH-resolved "python" (which on a clean Windows box is usually the Microsoft Store stub, not a real interpreter).' 10 42 950 18
+$lblSystemPythonHint.ForeColor = [System.Drawing.Color]::Gray
+$lblSystemPythonHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+$gbSystemPython.Controls.Add($lblSystemPythonHint)
 
-$gbSystemPython.Controls.Add((New-Label 'Java Home (optional):' 10 68 150))
-$tbJavaHome = New-Textbox 166 66 700
+$gbSystemPython.Controls.Add((New-Label 'Java Home (optional):' 10 66 150))
+$tbJavaHome = New-Textbox 166 64 700
 $gbSystemPython.Controls.Add($tbJavaHome)
-$btnBrowseJavaHome = New-Btn 'Browse…' 874 64 120 28
+$btnBrowseJavaHome = New-Btn 'Browse…' 874 62 120 28
 $gbSystemPython.Controls.Add($btnBrowseJavaHome)
-$lblJavaHomeHint = New-Label 'Only needed if Stage C picks the wrong JVM when multiple Javas are installed (must be 64-bit, matching the venv python).' 10 92 950 18
+$lblJavaHomeHint = New-Label 'Only needed if Stage C picks the wrong JVM when multiple Javas are installed (must be 64-bit, matching the venv python).' 10 90 950 18
 $lblJavaHomeHint.ForeColor = [System.Drawing.Color]::Gray
 $lblJavaHomeHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
 $gbSystemPython.Controls.Add($lblJavaHomeHint)
@@ -1408,6 +1569,21 @@ $btnBrowseJavaHome.Add_Click({
     $picked = Show-FolderPicker -Title 'Select the JDK/JRE home folder (e.g. C:\Program Files\Java\jdk-25.0.2)' -StartPath $tbJavaHome.Text
     if ($null -ne $picked -and $picked -ne '') { $tbJavaHome.Text = $picked }
 })
+
+# =============================================================================
+# HELPER: Resolve the interpreter used to CREATE the venv (bootstrap), not
+# the venv's own python. Override field wins if the user set one; otherwise
+# falls back to the configured/bundled system_python_exe. Centralized here
+# so Create Venv and the Environment Check (section C) can't drift apart.
+# =============================================================================
+function Get-ResolvedSystemPython {
+    $override = $tbSystemPython.Text.Trim()
+    if ($override -ne '') { return $override }
+    if ($null -ne $script:Config -and [string]$script:Config.paths.system_python_exe -ne '') {
+        return [string]$script:Config.paths.system_python_exe
+    }
+    return ''
+}
 
 # ── Environment Check ───────────────────────────────────────────────────────
 $gbEnvCheck = New-GroupBox 'Environment Check' 12 314 1000 400
@@ -1507,16 +1683,19 @@ function Refresh-SettingsFromConfig {
         $lblVenvStatusVal.ForeColor = [System.Drawing.Color]::FromArgb(190,30,30)
     }
     if ($tbSystemPython.Text.Trim() -eq '') {
-        $autoPy = Get-Command python.exe -ErrorAction SilentlyContinue
-        if ($autoPy) { $tbSystemPython.Text = $autoPy.Source }
+        # Default display only - the bundled runtime path from config, NEVER a
+        # PATH-resolved "python.exe" (that's the exact lookup that picks the
+        # Microsoft Store stub on a clean Windows box instead of a real
+        # interpreter, which is the bug this field's redefinition fixes).
+        $tbSystemPython.Text = [string]$script:Config.paths.system_python_exe
     }
     $tbJavaHome.Text = [string]$script:Config.environment.java_home
 }
 
 $btnCreateVenv.Add_Click({
-    $sysPy = $tbSystemPython.Text.Trim()
+    $sysPy = Get-ResolvedSystemPython
     if ($sysPy -eq '' -or -not (Test-Path -LiteralPath $sysPy)) {
-        [System.Windows.Forms.MessageBox]::Show('Please set a valid System Python Path first.','Create Venv',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        [System.Windows.Forms.MessageBox]::Show('Bootstrap Python not found. Reinstall the app, or set a valid override path on this tab.','Create Venv',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)
         return
     }
     if ($null -eq $script:Config) { $script:Config = Get-DefaultConfig }
@@ -1595,23 +1774,41 @@ $btnRunEnvCheck.Add_Click({
     $lstEnvResults.Items.Clear()
     if ($null -eq $script:Config) { $script:Config = Get-DefaultConfig }
 
-    # Check 1: system python >= 3.9
-    $sysPy = $tbSystemPython.Text.Trim()
-    if ($sysPy -ne '' -and (Test-Path -LiteralPath $sysPy)) {
-        try {
-            $verText = (& $sysPy '--version' 2>&1 | Out-String).Trim()
-            $ok1 = $false
-            if ($verText -match '(\d+)\.(\d+)(\.\d+)?') {
-                $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-                if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 9)) { $ok1 = $true }
-            }
-            if ($ok1) { [void]$lstEnvResults.Items.Add("✓ System Python: $verText") }
-            else      { [void]$lstEnvResults.Items.Add("✗ System Python below 3.9: $verText") }
-        } catch {
-            [void]$lstEnvResults.Items.Add('✗ System Python: could not run --version')
-        }
+    # Check 1: bootstrap Python — three DISTINCT failure states, not one
+    # generic "below 3.9". The original single regex-on-version-text check
+    # is exactly how a Microsoft Store alias stub (exit code 9009, prints
+    # "Python was not found; run without arguments to install from the
+    # Microsoft Store...") got misdiagnosed as "below 3.9" - that text has
+    # no parseable version number, so the regex just silently failed and
+    # printed the unrelated stub message under a wrong heading. Each state
+    # below gets looked for explicitly, in order, before falling through.
+    $sysPy = Get-ResolvedSystemPython
+    $isOverride = ($tbSystemPython.Text.Trim() -ne [string]$script:Config.paths.system_python_exe)
+    if ($sysPy -eq '' -or -not (Test-Path -LiteralPath $sysPy)) {
+        if ($isOverride) { [void]$lstEnvResults.Items.Add("✗ Override Python path not found: $sysPy") }
+        else             { [void]$lstEnvResults.Items.Add('✗ Bundled Python runtime not found — reinstall the app') }
     } else {
-        [void]$lstEnvResults.Items.Add('✗ System Python path not set or not found')
+        try {
+            $verOutput = (& $sysPy '--version' 2>&1 | Out-String).Trim()
+            $verExit   = $LASTEXITCODE
+            $isStub    = ($verExit -ne 0) -or
+                         ($verOutput -match 'Microsoft Store') -or
+                         ($verOutput -match 'was not found; run without arguments')
+            if ($isStub) {
+                [void]$lstEnvResults.Items.Add('✗ Python interpreter is a Store alias stub, not a real install')
+            } elseif ($verOutput -match '(\d+)\.(\d+)(\.\d+)?') {
+                $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+                if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 9)) {
+                    [void]$lstEnvResults.Items.Add("✓ Bootstrap Python: $verOutput")
+                } else {
+                    [void]$lstEnvResults.Items.Add("✗ Python $verOutput found, 3.9+ required")
+                }
+            } else {
+                [void]$lstEnvResults.Items.Add("✗ Bootstrap Python: unrecognized --version output: $verOutput")
+            }
+        } catch {
+            [void]$lstEnvResults.Items.Add('✗ Bootstrap Python: could not run --version')
+        }
     }
 
     # Check 2: Java found (honoring Java Home override if set) and 64-bit.
@@ -1669,19 +1866,37 @@ $btnRunEnvCheck.Add_Click({
 })
 
 # =============================================================================
-# STARTUP — load existing config (if present) or fall back to defaults
+# STARTUP — prefer the last-opened config (so working across multiple
+# projects over time just remembers where you left off), fall back to the
+# fixed DataRoot config, else start blank with Tabs 2-4 disabled.
+# Deliberately does NOT check $script:AppRoot (the install dir) first - that
+# location previously held a stale decoy config that silently hijacked the
+# active config path after the schema-B rewrite; see the legacy-migration
+# comment near the top of this file. AppRoot is only ever read once, for
+# that one-time forward migration - never as an ongoing startup source.
 # =============================================================================
-if (Test-Path -LiteralPath $script:ConfigPath) {
-    try { $script:Config = Load-ProjectConfigFile -Path $script:ConfigPath }
-    catch { $script:Config = Get-DefaultConfig }
+$startupLoaded     = $true
+$lastConfigPath    = Get-LastConfigPath
+$startupConfigPath = if ($null -ne $lastConfigPath) { $lastConfigPath } else { $script:ConfigPath }
+
+if (Test-Path -LiteralPath $startupConfigPath) {
+    try {
+        $script:Config     = Load-ProjectConfigFile -Path $startupConfigPath
+        $script:ConfigPath = $startupConfigPath
+    } catch {
+        $script:Config  = Get-DefaultConfig
+        $startupLoaded  = $false
+    }
 } else {
     $script:Config = Get-DefaultConfig
+    $startupLoaded = $false
 }
 
 Refresh-UIFromConfig
 Refresh-StagesGrid
 Refresh-OutputsTree
 Refresh-SettingsFromConfig
+Set-ProjectLoadedState -Loaded $startupLoaded
 
 # =============================================================================
 # LAUNCH
