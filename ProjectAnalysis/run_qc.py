@@ -629,18 +629,30 @@ def run_synthesis(context, output_root, stage_j_dir):
     except Exception as e:
         return None, f"Could not run Claude Code CLI: {e}"
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if any(s in stderr for s in ("401", "Not authenticated", "Could not resolve authentication")):
-            return None, ("Not logged in to Claude Code. Run 'claude setup-token' once in a "
-                          f"terminal, then try again. ({stderr[:200]})")
-        return None, f"Claude Code call failed (exit {result.returncode}): {stderr[:500]}"
-
+    # Parse the JSON envelope FIRST, before looking at the exit code or
+    # stderr. Confirmed empirically (real unauthenticated call on this
+    # machine): Claude Code reports its own errors - including "not logged
+    # in" - as valid JSON on stdout with is_error=true and the actual reason
+    # in the "result" field, with an unrelated (or empty) stderr and exit
+    # code 1. Checking stderr for auth-failure substrings, as an earlier
+    # version of this code did, misses this entirely.
+    envelope = None
     try:
         envelope = json.loads(result.stdout)
-        raw = envelope.get("result", "")
-    except json.JSONDecodeError as e:
-        return None, f"Could not parse Claude Code's output envelope: {e}"
+    except json.JSONDecodeError:
+        pass
+
+    if envelope is not None and envelope.get("is_error"):
+        return None, f"Claude Code reported an error: {envelope.get('result', '(no message)')}"
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        return None, f"Claude Code call failed (exit {result.returncode}): {stderr[:500] or '(no stderr output)'}"
+
+    if envelope is None:
+        return None, f"Could not parse Claude Code's output envelope. Raw stdout:\n{result.stdout[:500]}"
+
+    raw = envelope.get("result", "")
 
     # Strip markdown fences if the model wrapped its JSON despite instructions
     raw = raw.strip()
