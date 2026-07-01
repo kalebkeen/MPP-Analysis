@@ -265,6 +265,12 @@ function Get-DefaultConfig {
             # advanced override - editing it on the Settings tab and saving
             # just overwrites it, same as it already worked before bundling.
             java_home           = Join-Path $script:AppRoot 'java-runtime'
+            # Blank = let the JVM pick its own default heap. Only needs setting for
+            # very large .mpp/.xml snapshot files that overflow MPXJ's default heap
+            # (surfaces as a Java OutOfMemoryError partway through Stage C). Value is
+            # just the size (e.g. "2g", "512m") - start_jvm() in extract_snapshots.py
+            # prepends the -Xmx itself.
+            jvm_max_heap        = ''
             pip_packages = @(
                 'mpxj','jpype1','pandas','pyarrow','openpyxl',
                 'matplotlib','reportlab','pypdf','pikepdf','pdfplumber'
@@ -796,6 +802,7 @@ function Save-ConfigFromUI {
     if ($null -eq $script:Config) { $script:Config = Get-DefaultConfig }
 
     $script:Config.environment.java_home = $tbJavaHome.Text.Trim()
+    $script:Config.environment.jvm_max_heap = $tbJvmMaxHeap.Text.Trim()
     # Persist the Bootstrap Python field too - without this, an override typed
     # on the Settings tab only ever lived in the textbox for the current
     # session and silently reverted to the installer-bundled path on next
@@ -1567,7 +1574,7 @@ $lblVenvActionStatus.AutoEllipsis = $true
 $gbVenv.Controls.Add($lblVenvActionStatus)
 
 # ── Bootstrap Python / Java ───────────────────────────────────────────────
-$gbSystemPython = New-GroupBox 'Bootstrap Python  (creates the venv only — once it exists, all stage runs use the venv python)' 12 194 1000 110
+$gbSystemPython = New-GroupBox 'Bootstrap Python  (creates the venv only — once it exists, all stage runs use the venv python)' 12 194 1000 160
 $tabSettings.Controls.Add($gbSystemPython)
 
 $gbSystemPython.Controls.Add((New-Label 'Bootstrap Python Path:' 10 18 150))
@@ -1598,6 +1605,14 @@ $btnBrowseJavaHome.Add_Click({
     if ($null -ne $picked -and $picked -ne '') { $tbJavaHome.Text = $picked }
 })
 
+$gbSystemPython.Controls.Add((New-Label 'JVM Max Heap (optional):' 10 114 150))
+$tbJvmMaxHeap = New-Textbox 166 112 200
+$gbSystemPython.Controls.Add($tbJvmMaxHeap)
+$lblJvmMaxHeapHint = New-Label 'Blank = JVM default. Set only if Stage C runs out of memory on very large snapshots, e.g. 2g or 512m (this becomes the JVM''s -Xmx flag).' 10 138 950 18
+$lblJvmMaxHeapHint.ForeColor = [System.Drawing.Color]::Gray
+$lblJvmMaxHeapHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+$gbSystemPython.Controls.Add($lblJvmMaxHeapHint)
+
 # =============================================================================
 # HELPER: Resolve the interpreter used to CREATE the venv (bootstrap), not
 # the venv's own python. Override field wins if the user set one; otherwise
@@ -1614,7 +1629,7 @@ function Get-ResolvedSystemPython {
 }
 
 # ── Environment Check ───────────────────────────────────────────────────────
-$gbEnvCheck = New-GroupBox 'Environment Check' 12 314 1000 400
+$gbEnvCheck = New-GroupBox 'Environment Check' 12 364 1000 400
 $tabSettings.Controls.Add($gbEnvCheck)
 
 $btnRunEnvCheck = New-Btn 'Run Environment Check' 10 26 200 32 ([System.Drawing.Color]::FromArgb(70,100,140))
@@ -1730,6 +1745,7 @@ function Refresh-SettingsFromConfig {
         # one Save Config (or any stage run, which saves first) heals it.
         $tbJavaHome.Text = Join-Path $script:AppRoot 'java-runtime'
     }
+    $tbJvmMaxHeap.Text = [string]$script:Config.environment.jvm_max_heap
 }
 
 $btnCreateVenv.Add_Click({

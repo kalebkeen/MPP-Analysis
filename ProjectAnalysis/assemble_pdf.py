@@ -61,7 +61,10 @@ LM = RM = 0.85 * inch
 TM = BM = 0.75 * inch
 BODY_W = PW - LM - RM   # ≈ 442 pt
 
-CARLITO_DIR = Path("/usr/share/fonts/truetype/crosextra")
+# Installer bundles the 4 Carlito TTFs into a "fonts" folder alongside this
+# script (see PA-Pipeline-Setup.cs's CARLITO_FONTS_RESOURCE_NAME) - resolve
+# relative to this file's own location, not a Linux-only system font path.
+CARLITO_DIR = Path(__file__).resolve().parent / "fonts"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +101,27 @@ def register_fonts():
                            italic="Carlito-It", boldItalic="Carlito-BoldIt")
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section titles — single source of truth for both the in-body Part header
+# (_part_header calls below) and the TOC entry (TOC_SECTIONS in main()).
+# Previously each was hardcoded separately and had drifted apart: the TOC
+# claimed Part I covered a "Nine-Month" schedule trend (true of no project in
+# particular - it's not derived from any project's actual snapshot count),
+# and Parts II/IV/VI's real headers carried parenthetical subtitles the TOC
+# entries silently dropped. Keying both off the same dict makes that class of
+# drift impossible.
+# ─────────────────────────────────────────────────────────────────────────────
+SECTION_TITLES = {
+    "part_i":     "Part I — How We Got Here: the Schedule Trend",
+    "part_ii":    "Part II — What Drove the Finish Date (Critical-Path Delay Analysis)",
+    "part_iii":   "Part III — Where the Variance Sits Now",
+    "part_iv":    "Part IV — Path to Completion (Where the Job Is Headed)",
+    "part_v":     "Part V — Method & Governance",
+    "part_vi":    "Part VI — Buyout Delay Analysis (How the Delays Happened)",
+    "appendix_a": "Appendix A — Full Task-Level Data (All Buckets)",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -520,7 +544,7 @@ def section_overview(narrative, ST):
 
 
 def section_part_i(output_root, narrative, ST):
-    story = _part_header("Part I — How We Got Here: the Schedule Trend", ST)
+    story = _part_header(SECTION_TITLES["part_i"], ST)
     story += narr("part_i_intro", narrative, ST)
     k = output_root / "stage_k"
     story += _chart(k / "forecast_trend.png", BODY_W,
@@ -534,7 +558,7 @@ def section_part_i(output_root, narrative, ST):
 
 
 def section_part_ii(output_root, narrative, ST):
-    story = _part_header("Part II — What Drove the Finish Date (Critical-Path Delay Analysis)", ST)
+    story = _part_header(SECTION_TITLES["part_ii"], ST)
     story += narr("part_ii_intro", narrative, ST)
 
     # Controlling timeline table
@@ -568,7 +592,7 @@ def section_part_ii(output_root, narrative, ST):
 
 
 def section_part_iii(output_root, narrative, ST, cfg):
-    story = _part_header("Part III — Where the Variance Sits Now", ST)
+    story = _part_header(SECTION_TITLES["part_iii"], ST)
     status = cfg["project"].get("analysis_status_date", "")
     story += narr("part_iii_intro", narrative, ST)
 
@@ -630,7 +654,7 @@ def section_part_iii(output_root, narrative, ST, cfg):
 
 
 def section_part_iv(output_root, narrative, ST, cfg):
-    story = _part_header("Part IV — Path to Completion (Where the Job Is Headed)", ST)
+    story = _part_header(SECTION_TITLES["part_iv"], ST)
     story += narr("part_iv_intro", narrative, ST)
     k = output_root / "stage_k"
 
@@ -679,7 +703,7 @@ def section_part_iv(output_root, narrative, ST, cfg):
 
 def section_part_v(narrative, ST):
     """Methodology A–C — text templated from playbook; Opus can override via narrative."""
-    story = _part_header("Part V — Method & Governance", ST)
+    story = _part_header(SECTION_TITLES["part_v"], ST)
 
     # Methodology A
     story.append(Paragraph("Methodology A — How Each Variance Figure Is Calculated", ST["h2"]))
@@ -725,7 +749,7 @@ def section_part_v(narrative, ST):
 
 
 def section_part_vi(output_root, narrative, ST, cfg):
-    story = _part_header("Part VI — Buyout Delay Analysis (How the Delays Happened)", ST)
+    story = _part_header(SECTION_TITLES["part_vi"], ST)
     story += narr("part_vi_bottom_line", narrative, ST)
 
     # Bucket summary
@@ -785,7 +809,7 @@ def section_part_vi(output_root, narrative, ST, cfg):
 
 
 def section_appendix_a(output_root, narrative, ST):
-    story = _part_header("Appendix A — Full Task-Level Data (All Buckets)", ST)
+    story = _part_header(SECTION_TITLES["appendix_a"], ST)
     story += narr("appendix_a_note", narrative, ST)
 
     full = _load_parquet(output_root / "stage_e" / "construction_variance_full.parquet")
@@ -880,14 +904,14 @@ def main():
     # bookmark somehow never recorded a page (defensive; shouldn't happen since
     # every section always renders, even with placeholder text).
     TOC_SECTIONS = [
-        ("Executive Status Dashboard",                              "dashboard",  3),
-        ("Part I — How We Got Here: The Nine-Month Schedule Trend", "part_i",     4),
-        ("Part II — What Drove the Finish Date",                    "part_ii",    6),
-        ("Part III — Where the Variance Sits Now",                  "part_iii",   9),
-        ("Part IV — Path to Completion",                            "part_iv",   19),
-        ("Part V — Method & Governance",                            "part_v",    21),
-        ("Part VI — Buyout Delay Analysis",                         "part_vi",   25),
-        ("Appendix A — Full Task-Level Data (All Buckets)",         "appendix_a",32),
+        ("Executive Status Dashboard",   "dashboard",  3),
+        (SECTION_TITLES["part_i"],       "part_i",     4),
+        (SECTION_TITLES["part_ii"],      "part_ii",    6),
+        (SECTION_TITLES["part_iii"],     "part_iii",   9),
+        (SECTION_TITLES["part_iv"],      "part_iv",   19),
+        (SECTION_TITLES["part_v"],       "part_v",    21),
+        (SECTION_TITLES["part_vi"],      "part_vi",   25),
+        (SECTION_TITLES["appendix_a"],   "appendix_a",32),
     ]
 
     def build_story(section_pages=None):

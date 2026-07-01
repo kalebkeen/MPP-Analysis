@@ -66,7 +66,10 @@ GRAYTXT = "#606060"
 PALETTE = ["#1F4E78", "#E67E22", "#27632A", "#7D5BA6", "#C0392B", "#2C7BB6",
            "#9B59B6", "#16A085", "#D4AC0D", "#A0522D", "#5D6D7E", "#34495E"]
 
-CARLITO_DIR = Path("/usr/share/fonts/truetype/crosextra")
+# Installer bundles the 4 Carlito TTFs into a "fonts" folder alongside this
+# script (see PA-Pipeline-Setup.cs's CARLITO_FONTS_RESOURCE_NAME) - resolve
+# relative to this file's own location, not a Linux-only system font path.
+CARLITO_DIR = Path(__file__).resolve().parent / "fonts"
 
 
 def register_fonts():

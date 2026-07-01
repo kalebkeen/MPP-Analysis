@@ -55,7 +55,8 @@ def load_config(config_path: str) -> dict:
 # JVM startup
 # ---------------------------------------------------------------------------
 
-def start_jvm(mpxj_jar_path: str | None = None, java_home: str | None = None):
+def start_jvm(mpxj_jar_path: str | None = None, java_home: str | None = None,
+              jvm_max_heap: str | None = None):
     """
     Start JPype JVM with the MPXJ jar on the classpath.
     If mpxj_jar_path is None, attempts to locate it via the mpxj
@@ -64,6 +65,9 @@ def start_jvm(mpxj_jar_path: str | None = None, java_home: str | None = None):
     auto-detection, JPype can pick an incompatible JVM (e.g. a 32-bit one)
     when multiple Java installs exist on the same machine, even when a
     working 64-bit JVM is also present.
+    If jvm_max_heap is set (e.g. "2g", "512m"), it becomes the JVM's -Xmx -
+    needed for very large .mpp/.xml snapshots that overflow MPXJ's default
+    heap partway through parsing.
     """
     import jpype
     import jpype.imports
@@ -110,8 +114,14 @@ def start_jvm(mpxj_jar_path: str | None = None, java_home: str | None = None):
     extra_jars = [str(p) for p in jar_dir.glob("*.jar") if str(p) != mpxj_jar_path]
     classpath.extend(extra_jars)
 
+    jvmargs = []
+    if jvm_max_heap:
+        jvmargs.append(f"-Xmx{jvm_max_heap}")
+
     print(f"  JVM classpath: {mpxj_jar_path}  (+{len(extra_jars)} dependency jar(s))")
-    jpype.startJVM(classpath=classpath, convertStrings=True)
+    if jvmargs:
+        print(f"  JVM args: {' '.join(jvmargs)}")
+    jpype.startJVM(*jvmargs, classpath=classpath, convertStrings=True)
     print(f"  JVM started (Java {jpype.getJVMVersion()})")
 
 
@@ -488,7 +498,8 @@ def main():
     # ── Start JVM ────────────────────────────────────────────────────────
     print("  Starting JVM...")
     java_home = cfg.get("environment", {}).get("java_home") or None
-    start_jvm(args.mpxj_jar, java_home)
+    jvm_max_heap = cfg.get("environment", {}).get("jvm_max_heap") or None
+    start_jvm(args.mpxj_jar, java_home, jvm_max_heap)
     print()
 
     # ── Extract each snapshot ─────────────────────────────────────────────

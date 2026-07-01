@@ -35,19 +35,26 @@
   does) - the installer moves that folder's contents up at install time, so
   it doesn't matter what that folder is named.
 
+.PARAMETER CarlitoFontZip
+  Path to a zip of the 4 Carlito TTFs (Regular/Bold/Italic/BoldItalic, SIL
+  OFL) to stage as the bundled chart/PDF font. Omit to leave whatever's
+  already staged untouched. Unlike the Java runtime zip, this one is
+  extracted FLAT (no wrapping top-level folder expected).
+
 .EXAMPLE
   .\Embed-Sources.ps1
     Re-embeds PA-Pipeline.ps1 and all 9 stage scripts only.
 
 .EXAMPLE
-  .\Embed-Sources.ps1 -PythonInstallerPath C:\downloads\python-3.12.10-amd64.exe -JavaRuntimePath C:\downloads\temurin-21-jre-windows-x64.zip
-    Also stages the bundled Python runtime and Java runtime for Build-Setup.bat.
+  .\Embed-Sources.ps1 -PythonInstallerPath C:\downloads\python-3.12.10-amd64.exe -JavaRuntimePath C:\downloads\temurin-21-jre-windows-x64.zip -CarlitoFontZip C:\downloads\carlito-fonts.zip
+    Also stages the bundled Python runtime, Java runtime, and Carlito fonts for Build-Setup.bat.
 #>
 param(
     [string]$SetupPath           = (Join-Path $PSScriptRoot 'PA-Pipeline-Setup.cs'),
     [string]$AppPs1Path          = (Join-Path $PSScriptRoot 'PA-Pipeline.ps1'),
     [string]$PythonInstallerPath = '',
-    [string]$JavaRuntimePath     = ''
+    [string]$JavaRuntimePath     = '',
+    [string]$CarlitoFontZip      = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +64,7 @@ $ErrorActionPreference = 'Stop'
 # (Program.GetPythonInstallerBytes / JAVA_RUNTIME_RESOURCE_NAME).
 $PythonInstallerTargetName = 'python-3.12.10-amd64.exe'
 $JavaRuntimeTargetName     = 'temurin-21-jre-windows-x64.zip'
+$CarlitoFontTargetName     = 'carlito-fonts.zip'
 
 function Get-Base64OfFile {
     param([string]$Path)
@@ -121,4 +129,13 @@ if ($JavaRuntimePath -ne '') {
     Copy-Item -LiteralPath $JavaRuntimePath -Destination $target -Force
 } else {
     Write-Host "No -JavaRuntimePath given - leaving the staged Java runtime (if any) untouched."
+}
+
+if ($CarlitoFontZip -ne '') {
+    if (-not (Test-Path -LiteralPath $CarlitoFontZip)) { throw "Carlito font zip not found: $CarlitoFontZip" }
+    $target = Join-Path $PSScriptRoot $CarlitoFontTargetName
+    Write-Host "Staging bundled Carlito fonts -> $target"
+    Copy-Item -LiteralPath $CarlitoFontZip -Destination $target -Force
+} else {
+    Write-Host "No -CarlitoFontZip given - leaving the staged Carlito fonts (if any) untouched."
 }

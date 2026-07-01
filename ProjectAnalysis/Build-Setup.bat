@@ -17,6 +17,11 @@ set "ICON_PATH="
 :: these exact names.
 set "PYTHON_INSTALLER=!SCRIPT_DIR!\python-3.12.10-amd64.exe"
 set "JAVA_RUNTIME_ZIP=!SCRIPT_DIR!\temurin-21-jre-windows-x64.zip"
+:: Bundled Carlito font (SIL OFL, googlefonts/carlito), same rationale and
+:: same PE-resource embedding as the two files above - a real test compile
+:: showed this project's csc.exe hard-fails on base64 string constants this
+:: large, so binary assets go in via /resource: instead.
+set "CARLITO_FONTS_ZIP=!SCRIPT_DIR!\carlito-fonts.zip"
 
 cls
 echo.
@@ -97,8 +102,18 @@ if not exist "!JAVA_RUNTIME_ZIP!" (
     pause
     exit /b 1
 )
+if not exist "!CARLITO_FONTS_ZIP!" (
+    echo.
+    echo ERROR: Bundled Carlito fonts not found.
+    echo        Expected at: !CARLITO_FONTS_ZIP!
+    echo        Run Embed-Sources.ps1 -CarlitoFontZip ^<path^> first.
+    echo.
+    pause
+    exit /b 1
+)
 set "PY_RESOURCE_ARG=/resource:"!PYTHON_INSTALLER!",PASetup.PythonInstaller.exe"
 set "JAVA_RESOURCE_ARG=/resource:"!JAVA_RUNTIME_ZIP!",PASetup.JavaRuntime.zip"
+set "CARLITO_RESOURCE_ARG=/resource:"!CARLITO_FONTS_ZIP!",PASetup.CarlitoFonts.zip"
 
 "!CSC!" /nologo /target:winexe /optimize+ ^
     /r:System.dll ^
@@ -110,6 +125,7 @@ set "JAVA_RESOURCE_ARG=/resource:"!JAVA_RUNTIME_ZIP!",PASetup.JavaRuntime.zip"
     !ICON_ARG! ^
     !PY_RESOURCE_ARG! ^
     !JAVA_RESOURCE_ARG! ^
+    !CARLITO_RESOURCE_ARG! ^
     "!CS_FILE!"
 
 set "COMPILE_RESULT=!ERRORLEVEL!"
