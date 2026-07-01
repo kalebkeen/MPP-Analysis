@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -356,39 +357,119 @@ def check_zero_baseline(output_root, cfg):
 # ---------------------------------------------------------------------------
 # Opus synthesis
 # ---------------------------------------------------------------------------
+#
+# Authentication: this shells out to the `claude` CLI rather than calling the
+# Anthropic API directly with a stored key. No credential of any kind lives
+# in this codebase or in project_config.json - the user authenticates once,
+# outside this app, via `claude setup-token` (or `claude login`), the same
+# as any other Claude Code use on their machine. check_claude_auth() below
+# only ever reads that already-established session; it never prompts for or
+# persists a credential itself.
+
+CLAUDE_MODEL = "claude-opus-4-8"
+
+
+def _find_claude_cli():
+    """Resolve the claude CLI's real path (handles the .cmd/.exe extension
+    resolution shutil.which does correctly on Windows for npm-installed
+    tools - a bare "claude" passed to subprocess with shell=False is not
+    guaranteed to resolve the same way a shell's own PATHEXT lookup would)."""
+    import shutil
+    return shutil.which("claude")
+
+
+def check_claude_auth():
+    """Pre-flight check, run before doing any real work. Returns (ok, message).
+    Never triggers a login itself - `claude auth login` is inherently
+    interactive (opens a browser) and cannot run headlessly, so if the user
+    isn't authenticated the only correct move is to say so clearly and stop,
+    not to attempt something that would hang with no visible window to
+    complete it from (this Python process has no console of its own - it's
+    launched from the NoConsole PA-Pipeline.exe)."""
+    claude_path = _find_claude_cli()
+    if not claude_path:
+        return False, ("Claude Code CLI not found on PATH. Install it, then run "
+                       "'claude setup-token' once in a terminal before using Synthesize.")
+    try:
+        result = subprocess.run([claude_path, "auth", "status"],
+                               capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        return False, f"Could not check Claude Code auth status: {e}"
+    if result.returncode != 0:
+        return False, ("Not logged in to Claude Code. Run 'claude setup-token' (or "
+                       "'claude login') once in a terminal, then try Synthesize again. "
+                       "No API key or account info is ever stored by this app.")
+    return True, "Authenticated."
+
 
 def _load_context_for_synthesis(output_root, cfg, qc_results):
-    """Collect the key data points Opus needs to write the review-prep narrative."""
+    """Collect the data points Opus needs to write every narrative.json section -
+    the 4 review-prep fields this originally covered, plus the ~14 body-text
+    sections assemble_pdf.py actually renders as [NARRATIVE PLACEHOLDER] until
+    filled in. Every value defaults to empty/absent when a stage's output
+    doesn't exist (e.g. a project with no buyout scope has no stage_h files) -
+    the prompt is responsible for telling Opus to say so rather than invent
+    numbers for sections with no real data."""
     project = cfg["project"]["name"]
     status  = cfg["project"].get("analysis_status_date", "")
 
-    # Stage F: top resources by net days
+    # Stage F: controlling timeline + top resources by net days + ledger totals
+    ctl = _parquet(output_root / "stage_f" / "controlling_timeline.parquet")
+    controlling_timeline = ctl.tail(8).to_dict(orient="records") if not ctl.empty else []
     br = _parquet(output_root / "stage_f" / "by_resource_net.parquet")
     top_resources = br.head(5).to_dict(orient="records") if not br.empty else []
+    led_path = output_root / "stage_f" / "delay_ledger_report.json"
+    ledger   = json.loads(led_path.read_text()) if led_path.exists() else {}
 
-    # Stage E: top variance lines
+    # Stage E: bucket summary, top variance lines, per-building top, zero-baseline
+    bs = _parquet(output_root / "stage_e" / "bucket_summary.parquet")
+    bucket_summary = bs.to_dict(orient="records") if not bs.empty else []
     tn = _parquet(output_root / "stage_e" / "top_n_all_buckets.parquet")
     top_tasks = tn.head(6)[["bucket","task_name","abs_variance"]].to_dict(
         orient="records") if not tn.empty else []
+    pb = _parquet(output_root / "stage_e" / "per_building_top.parquet")
+    per_building_top = (pb.groupby("bucket").head(2)[["bucket","task_name","abs_variance"]]
+                        .to_dict(orient="records") if not pb.empty else [])
+    full = _parquet(output_root / "stage_e" / "construction_variance_full.parquet")
+    appendix_row_count = int(len(full)) if not full.empty else 0
 
-    # Stage G: float and completion
+    # Stage G: building turnover, float health, completion range, forward report
+    bt = _parquet(output_root / "stage_g" / "building_turnover.parquet")
+    building_turnover = bt.to_dict(orient="records") if not bt.empty else []
+    fh = _parquet(output_root / "stage_g" / "float_health.parquet")
+    float_bands = fh.to_dict(orient="records") if not fh.empty else []
     cr_path = output_root / "stage_g" / "completion_range.json"
     comp_range = json.loads(cr_path.read_text()) if cr_path.exists() else {}
     fwd_path   = output_root / "stage_g" / "forward_report.json"
     fwd        = json.loads(fwd_path.read_text()) if fwd_path.exists() else {}
 
-    # Stage F: net movement
-    led_path = output_root / "stage_f" / "delay_ledger_report.json"
-    ledger   = json.loads(led_path.read_text()) if led_path.exists() else {}
+    # Stage H: buyout summary, stage breakdown, top packages (absent entirely
+    # for a project with no buyout scope configured - e.g. buyout_outline_
+    # prefixes: [] - which is a legitimate, not broken, configuration)
+    bsum = _parquet(output_root / "stage_h" / "buyout_summary.parquet")
+    buyout_summary = bsum.to_dict(orient="records") if not bsum.empty else []
+    sb = _parquet(output_root / "stage_h" / "buyout_stage_breakdown.parquet")
+    buyout_stage_breakdown = sb.to_dict(orient="records") if not sb.empty else []
+    tp = _parquet(output_root / "stage_h" / "buyout_packages_ranked.parquet")
+    top_packages = tp.head(5).to_dict(orient="records") if not tp.empty else []
 
     return {
         "project": project,
         "status_date": status,
         "top_controlling_resources": top_resources,
-        "top_variance_tasks": top_tasks,
-        "completion_range": comp_range,
-        "float_summary": fwd.get("float_summary", {}),
+        "controlling_timeline": controlling_timeline,
         "delay_ledger_totals": ledger.get("totals", {}),
+        "bucket_summary": bucket_summary,
+        "top_variance_tasks": top_tasks,
+        "per_building_top": per_building_top,
+        "appendix_row_count": appendix_row_count,
+        "building_turnover": building_turnover,
+        "float_bands": float_bands,
+        "float_summary": fwd.get("float_summary", {}),
+        "completion_range": comp_range,
+        "buyout_summary": buyout_summary,
+        "buyout_stage_breakdown": buyout_stage_breakdown,
+        "top_packages": top_packages,
         "qc_findings": {k: {ek: ev for ek, ev in v.items()
                              if ek not in ("bucket_detail",)}
                         for k, v in qc_results.items()
@@ -400,24 +481,50 @@ def _load_context_for_synthesis(output_root, cfg, qc_results):
     }
 
 
-SYNTHESIS_PROMPT = """You are a construction project controls analyst preparing executive review materials.
+SYNTHESIS_PROMPT = """You are a construction project controls analyst writing the narrative text for an executive schedule brief. Every section below feeds directly into a PDF that a project executive will read - be specific and grounded in the numbers given, and NEVER invent a fact, resource name, or figure that isn't in the data below.
 
-Here is the data from the schedule analytics pipeline for {project} (status {status_date}):
+If a data section is empty or missing (for example, a project with no buyout scope configured has no buyout data at all - that's a legitimate configuration, not an error), say so plainly in the relevant field instead of fabricating content. A short, honest "No buyout scope was configured for this project" beats an invented paragraph.
+
+PROJECT: {project}  |  STATUS DATE: {status_date}
 
 TOP CONTROLLING RESOURCES (net days each controlled the forecast finish):
 {top_resources}
 
-TOP VARIANCE TASKS (construction):
-{top_tasks}
-
-COMPLETION FORECAST (empirical range over last N weeks):
-{comp_range}
-
-FLOAT HEALTH:
-{float_summary}
+CONTROLLING ACTIVITY TIMELINE (most recent control periods):
+{controlling_timeline}
 
 DELAY LEDGER TOTALS:
 {ledger_totals}
+
+VARIANCE BY BUCKET:
+{bucket_summary}
+
+TOP VARIANCE TASKS (construction):
+{top_tasks}
+
+TOP PER-BUILDING VARIANCE TASKS:
+{per_building_top}
+
+APPENDIX A ROW COUNT (full task-level detail table): {appendix_row_count}
+
+BUILDING TURNOVER (baseline vs forecast):
+{building_turnover}
+
+FLOAT HEALTH (incomplete tasks by slack band):
+{float_bands}
+{float_summary}
+
+COMPLETION FORECAST (empirical range over last N weekly snapshots):
+{comp_range}
+
+BUYOUT — VARIANCE BY BUCKET (empty if no buyout scope configured):
+{buyout_summary}
+
+BUYOUT — STAGE BREAKDOWN (empty if no buyout scope configured):
+{buyout_stage_breakdown}
+
+BUYOUT — TOP PACKAGES BY VARIANCE (empty if no buyout scope configured):
+{top_packages}
 
 QC FINDINGS:
 {qc_findings}
@@ -425,27 +532,40 @@ QC FINDINGS:
 NEGATIVE-VARIANCE BUILDINGS (tracking shorter than baseline): {neg_buildings}
 ZERO-BASELINE LINES: {zero_baseline_count}
 
-Based on this data, generate the following executive review prep materials.
-Respond ONLY in valid JSON with this exact structure — no preamble, no markdown fences:
+Respond ONLY in valid JSON with this exact structure - no preamble, no markdown fences:
 
 {{
-  "questions_for_next_review": [
-    "Question 1",
-    "Question 2",
-    "Question 3",
-    "Question 4",
-    "Question 5"
+  "bottom_line": "1-2 sentences: the single most important takeaway for an executive reading only this line.",
+  "executive_overview": "1-2 short paragraphs summarizing overall schedule health, grounded in the KPIs and findings above.",
+  "risk_1": "Single most significant current risk, one sentence.",
+  "risk_2": "Second risk, one sentence.",
+  "risk_3": "Third risk, one sentence.",
+  "risk_4": "Fourth risk, one sentence.",
+  "status_by_dimension_core": [
+    {{"dimension": "Schedule", "status": "On Track|At Risk|Behind", "note": "one short clause why"}},
+    {{"dimension": "Critical path", "status": "...", "note": "..."}},
+    {{"dimension": "Float / risk", "status": "...", "note": "..."}},
+    {{"dimension": "Turnover", "status": "...", "note": "..."}}
   ],
+  "part_i_intro": "Intro paragraph for 'How We Got Here: the Schedule Trend' - frames what the forecast-completion trend chart shows.",
+  "part_i_trend_analysis": "Analysis paragraph interpreting the forecast-vs-baseline trend across snapshots.",
+  "part_i_bucket_analysis": "Analysis paragraph interpreting cumulative net variance by bucket.",
+  "part_ii_intro": "Intro paragraph for 'What Drove the Finish Date (Critical-Path Delay Analysis)', grounded in the controlling timeline and top resources.",
+  "part_ii_ledger_analysis": "Analysis paragraph interpreting the delay ledger totals and which resources drove the most net days.",
+  "part_iii_intro": "Intro paragraph for 'Where the Variance Sits Now', grounded in the bucket summary and top variance tasks.",
+  "part_iii_per_building_note": "Short note framing the per-building top-variance tables that follow.",
+  "part_iv_intro": "Intro paragraph for 'Path to Completion', grounded in building turnover, float health, and the completion range.",
+  "part_vi_bottom_line": "Bottom-line paragraph for 'Buyout Delay Analysis' - if buyout data above is empty, say plainly that no buyout scope was configured for this project instead of inventing findings.",
+  "part_vi_stage_breakdown_note": "Short note framing the buyout stage-breakdown table - same rule: say so if there's no buyout data.",
+  "part_vi_methodology_d_note": "Short closing note for the buyout section - same rule.",
+  "appendix_a_note": "One short sentence framing the full task-level appendix table ({appendix_row_count} rows).",
+  "questions_for_next_review": ["Question 1", "Question 2", "Question 3", "Question 4", "Question 5"],
   "watch_list": [
     {{"scope": "...", "reason": "..."}},
     {{"scope": "...", "reason": "..."}},
     {{"scope": "...", "reason": "..."}}
   ],
-  "data_quality_notes": [
-    "Note 1",
-    "Note 2",
-    "Note 3"
-  ],
+  "data_quality_notes": ["Note 1", "Note 2", "Note 3"],
   "scope_gaps": [
     {{"dimension": "...", "status": "Not in this brief", "what_is_needed": "..."}},
     {{"dimension": "...", "status": "Not in this brief", "what_is_needed": "..."}}
@@ -453,59 +573,76 @@ Respond ONLY in valid JSON with this exact structure — no preamble, no markdow
 }}
 
 Rules:
-- questions_for_next_review: 4-6 items, each a specific, answerable question about what would change the risk picture. Grounded in the actual data above — name specific resources, tasks, buildings, or findings.
+- Every "intro"/"analysis"/"note" field: 2-5 sentences, plain prose (no markdown headers), ready to paste directly into the PDF body.
+- risk_1..4 and status_by_dimension_core: only the 4 dimensions listed - Cost/budget and Open items are handled separately, not part of your response.
+- questions_for_next_review: 4-6 items, each a specific, answerable question grounded in the actual data above - name specific resources, tasks, or buildings.
 - watch_list: 3-5 items, each a resource or scope with a specific data-driven reason it carries the most leverage to protect or lose the finish.
-- data_quality_notes: 3-5 items, specific factual caveats (e.g. UID persistence rate, zero-baseline count, rename count) formatted as complete sentences ready to paste into Part V of the brief.
-- scope_gaps: exactly 2 items — Cost/budget (Sage 300 CRE) and Open items (ACC/Autodesk Build) — with the what_is_needed field filled in precisely.
+- data_quality_notes: 3-5 items, specific factual caveats (e.g. UID persistence rate, zero-baseline count, rename count) formatted as complete sentences.
+- scope_gaps: exactly 2 items - Cost/budget (Sage 300 CRE) and Open items (ACC/Autodesk Build) - with the what_is_needed field filled in precisely.
 """
 
 
 def run_synthesis(context, output_root, stage_j_dir):
-    """Call claude-opus-4-8 to generate the review-prep narrative."""
-    import urllib.request
+    """Call Claude (claude-opus-4-8) via the `claude` CLI to generate every
+    narrative.json section. Requires the user to have already authenticated
+    via `claude setup-token`/`claude login` outside this app - see
+    check_claude_auth(). Returns (synthesis_dict, None) on success or
+    (None, error_message) on failure; never raises for an expected failure
+    mode (auth, network, bad JSON) so the caller can report it cleanly."""
+    claude_path = _find_claude_cli()
+    if not claude_path:
+        return None, "Claude Code CLI not found on PATH."
 
     prompt = SYNTHESIS_PROMPT.format(
         project=context["project"],
         status_date=context["status_date"],
         top_resources=json.dumps(context["top_controlling_resources"], indent=2),
-        top_tasks=json.dumps(context["top_variance_tasks"], indent=2),
-        comp_range=json.dumps(context["completion_range"], indent=2),
-        float_summary=json.dumps(context["float_summary"], indent=2),
+        controlling_timeline=json.dumps(context["controlling_timeline"], indent=2, default=str),
         ledger_totals=json.dumps(context["delay_ledger_totals"], indent=2),
+        bucket_summary=json.dumps(context["bucket_summary"], indent=2),
+        top_tasks=json.dumps(context["top_variance_tasks"], indent=2),
+        per_building_top=json.dumps(context["per_building_top"], indent=2),
+        appendix_row_count=context["appendix_row_count"],
+        building_turnover=json.dumps(context["building_turnover"], indent=2, default=str),
+        float_bands=json.dumps(context["float_bands"], indent=2),
+        float_summary=json.dumps(context["float_summary"], indent=2),
+        comp_range=json.dumps(context["completion_range"], indent=2),
+        buyout_summary=json.dumps(context["buyout_summary"], indent=2),
+        buyout_stage_breakdown=json.dumps(context["buyout_stage_breakdown"], indent=2),
+        top_packages=json.dumps(context["top_packages"], indent=2),
         qc_findings=json.dumps(context["qc_findings"], indent=2),
         neg_buildings=context["negative_variance_buildings"],
         zero_baseline_count=context["zero_baseline_count"],
     )
 
-    payload = json.dumps({
-        "model": "claude-opus-4-8",
-        "max_tokens": 2000,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    try:
+        # Prompt goes via stdin, not as a CLI argument - this prompt runs
+        # ~12K chars for a small project and scales with how much data each
+        # stage produced, which could approach Windows' ~32K command-line
+        # length limit as a positional arg. stdin has no such ceiling.
+        result = subprocess.run(
+            [claude_path, "-p", "--output-format", "json", "--model", CLAUDE_MODEL],
+            input=prompt, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "Claude Code call timed out after 300s."
+    except Exception as e:
+        return None, f"Could not run Claude Code CLI: {e}"
 
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if any(s in stderr for s in ("401", "Not authenticated", "Could not resolve authentication")):
+            return None, ("Not logged in to Claude Code. Run 'claude setup-token' once in a "
+                          f"terminal, then try again. ({stderr[:200]})")
+        return None, f"Claude Code call failed (exit {result.returncode}): {stderr[:500]}"
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        return None, f"API call failed: {e}"
+        envelope = json.loads(result.stdout)
+        raw = envelope.get("result", "")
+    except json.JSONDecodeError as e:
+        return None, f"Could not parse Claude Code's output envelope: {e}"
 
-    # Extract text content
-    raw = ""
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            raw += block["text"]
-
-    # Parse JSON — strip fences if present
+    # Strip markdown fences if the model wrapped its JSON despite instructions
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -514,6 +651,17 @@ def run_synthesis(context, output_root, stage_j_dir):
         synthesis = json.loads(raw)
     except json.JSONDecodeError as e:
         return None, f"JSON parse failed: {e}\nRaw response:\n{raw[:500]}"
+
+    # status_by_dimension: the 4 Opus-generated rows plus the 2 fixed
+    # out-of-scope rows, owned here rather than re-generated by the model
+    # every run so their wording can never drift.
+    core_dims = synthesis.get("status_by_dimension_core", [])
+    status_by_dimension = [[d.get("dimension",""), d.get("status",""), d.get("note","")]
+                           for d in core_dims]
+    status_by_dimension.append(["Cost / budget", "Not in this brief",
+                               "Requires Sage 300 CRE integration"])
+    status_by_dimension.append(["Open items (RFI/submittal)", "Not in this brief",
+                               "Available in ACC / Autodesk Build"])
 
     # ── Write synthesis ───────────────────────────────────────────────────
     synth_path = output_root / "stage_m" / "synthesis.json"
@@ -528,7 +676,21 @@ def run_synthesis(context, output_root, stage_j_dir):
     else:
         narrative = {}
 
-    # Map synthesis keys to narrative keys
+    # Map synthesis keys to narrative keys - every key assemble_pdf.py's
+    # narr() calls read, plus the 4 review-prep fields this originally covered.
+    text_keys = [
+        "bottom_line", "executive_overview",
+        "part_i_intro", "part_i_trend_analysis", "part_i_bucket_analysis",
+        "part_ii_intro", "part_ii_ledger_analysis",
+        "part_iii_intro", "part_iii_per_building_note",
+        "part_iv_intro",
+        "part_vi_bottom_line", "part_vi_stage_breakdown_note", "part_vi_methodology_d_note",
+        "appendix_a_note",
+        "risk_1", "risk_2", "risk_3", "risk_4",
+    ]
+    for key in text_keys:
+        narrative[key] = synthesis.get(key, "")
+    narrative["status_by_dimension"]       = status_by_dimension
     narrative["questions_for_next_review"] = synthesis.get("questions_for_next_review", [])
     narrative["watch_list"]                = synthesis.get("watch_list", [])
     narrative["data_quality_notes"]        = synthesis.get("data_quality_notes", [])
@@ -550,6 +712,14 @@ def main():
     parser.add_argument("--synthesize", action="store_true",
                         help="Call Opus API to generate questions-for-review and watch-list")
     args = parser.parse_args()
+
+    if args.synthesize:
+        # Fail fast, before spending time on the mechanical QC checks below,
+        # if synthesis can't possibly succeed.
+        auth_ok, auth_msg = check_claude_auth()
+        if not auth_ok:
+            print(f"\n  ✗ Cannot run --synthesize: {auth_msg}\n")
+            return 1
 
     cfg         = load_config(args.config)
     project     = cfg["project"]["name"]
@@ -653,14 +823,24 @@ def main():
     print(f"  Overall: {'PASS' if qc_report['overall_pass'] else 'WARNINGS — review above'}")
 
     # ── Optional: Opus synthesis ──────────────────────────────────────────
+    synthesis_failed = False
     if args.synthesize:
-        print(f"\n  Running Opus synthesis (claude-opus-4-8)...")
+        print(f"\n  Running Opus synthesis ({CLAUDE_MODEL})...")
         context = _load_context_for_synthesis(output_root, cfg, qc_results)
         synthesis, err = run_synthesis(context, output_root, stage_j_dir)
         if err:
+            synthesis_failed = True
             print(f"  ✗ Synthesis failed: {err}")
         else:
+            narrative_keys_filled = sum(1 for k in (
+                "bottom_line", "executive_overview", "part_i_intro",
+                "part_i_trend_analysis", "part_i_bucket_analysis", "part_ii_intro",
+                "part_ii_ledger_analysis", "part_iii_intro", "part_iii_per_building_note",
+                "part_iv_intro", "part_vi_bottom_line", "part_vi_stage_breakdown_note",
+                "part_vi_methodology_d_note", "appendix_a_note",
+            ) if synthesis.get(k))
             print(f"  ✓ Synthesis complete")
+            print(f"    Narrative sections written: {narrative_keys_filled}/14")
             print(f"    Questions for review: {len(synthesis.get('questions_for_next_review',[]))}")
             print(f"    Watch-list items:     {len(synthesis.get('watch_list',[]))}")
             print(f"    Data-quality notes:   {len(synthesis.get('data_quality_notes',[]))}")
@@ -679,7 +859,11 @@ def main():
         print(f"\n  (Run with --synthesize to generate Opus review-prep narrative)")
 
     print(f"\n{'='*60}\n")
-    return 0
+    # Mechanical QC (Part 1) always ran and wrote its report regardless of
+    # synthesis outcome - only fail the whole stage if synthesis was
+    # explicitly requested and didn't complete, so Tab 2/the run log surface
+    # it instead of silently showing green with no narrative content written.
+    return 1 if synthesis_failed else 0
 
 
 if __name__ == "__main__":

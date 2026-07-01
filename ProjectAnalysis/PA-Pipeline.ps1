@@ -1031,12 +1031,15 @@ $pnlStageBtns.Controls.AddRange(@($btnOpenNarrative, $btnRunSelected, $btnRunAll
 
 # =============================================================================
 # HELPER: minimal narrative.json skeleton. Keys are exactly what
-# assemble_pdf.py's narr()/risk_*/status_by_dimension calls read and what
-# run_qc.py's --synthesize merges in (questions_for_next_review, watch_list,
-# data_quality_notes, scope_gaps). methodology_a/b/c are deliberately
-# omitted - assemble_pdf.py already has built-in default text for those -
-# as is toc_overrides, an advanced manual override with a different
-# (list-of-tuples) shape, not part of the basic fill-in-the-blank template.
+# assemble_pdf.py's narr()/risk_*/status_by_dimension calls read - run_qc.py's
+# --synthesize now fills in every key here via Opus (all the narrative body
+# text plus questions_for_next_review/watch_list/data_quality_notes/
+# scope_gaps), so this template mainly exists for manual editing/overriding
+# individual sections afterward, not as the primary fill-in path anymore.
+# methodology_a/b/c are deliberately omitted - assemble_pdf.py already has
+# built-in default text for those - as is toc_overrides, an advanced manual
+# override with a different (list-of-tuples) shape, not part of the basic
+# fill-in-the-blank template.
 # =============================================================================
 function Get-NarrativeTemplateJson {
     $skeleton = [ordered]@{
@@ -1210,6 +1213,16 @@ $btnRunSynthesize.Add_Click({
         [System.Windows.Forms.MessageBox]::Show('No stages are checked.','Run Selected + Synthesize',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information)
         return
     }
+    # Only Stage M ever actually calls Claude, so only gate on it being
+    # checked - failing fast here saves running every other selected stage
+    # first only to discover synthesis can't work at the very end.
+    if ($selected | Where-Object { $_.Code -eq 'M' }) {
+        $authCheck = Test-ClaudeCliAuth
+        if (-not $authCheck.Ok) {
+            [System.Windows.Forms.MessageBox]::Show($authCheck.Message,'Run Selected + Synthesize',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+    }
     Start-StageRun -StagesToRun $selected -Synthesize $true
 })
 
@@ -1343,6 +1356,33 @@ function Invoke-PythonStage {
 }
 
 # =============================================================================
+# HELPER: Pre-flight check for Synthesize - mirrors run_qc.py's
+# check_claude_auth() so a bad auth state is caught before running any
+# stages at all, not discovered only after Stage M finishes at the end of
+# a run. Never triggers a login itself - `claude auth login` is inherently
+# interactive (opens a browser) and cannot run headlessly, so if the user
+# isn't authenticated the only correct move is to say so clearly and stop.
+# No API key or account credential of any kind is read, stored, or passed
+# by this app - it only checks the session the user already established
+# via `claude setup-token`/`claude login` on their own, outside this app.
+# =============================================================================
+function Test-ClaudeCliAuth {
+    $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($null -eq $claudeCmd) {
+        return @{ Ok = $false; Message = "Claude Code CLI not found on PATH. Install it, then run 'claude setup-token' once in a terminal before using Synthesize." }
+    }
+    try {
+        & $claudeCmd.Source auth status *> $null
+        if ($LASTEXITCODE -ne 0) {
+            return @{ Ok = $false; Message = "Not logged in to Claude Code. Run 'claude setup-token' (or 'claude login') once in a terminal, then try Synthesize again. No API key or account info is ever stored by this app." }
+        }
+    } catch {
+        return @{ Ok = $false; Message = "Could not check Claude Code auth status: $($_.Exception.Message)" }
+    }
+    return @{ Ok = $true; Message = 'Authenticated.' }
+}
+
+# =============================================================================
 # HELPER: Orchestrate a run across multiple stages (used by Tab 2 buttons)
 # =============================================================================
 function Start-StageRun {
@@ -1368,6 +1408,7 @@ function Start-StageRun {
 
     $script:StageRunActive   = $true
     $script:CancelRequested  = $false
+    $script:SynthesisFailed  = $false
     $btnRunSelected.Enabled   = $false
     $btnRunAll.Enabled        = $false
     $btnRunSynthesize.Enabled = $false
@@ -1419,6 +1460,17 @@ function Start-StageRun {
             Write-Log "Stage $($stage.Code) FAILED (exit code $exitCode)." ([System.Drawing.Color]::FromArgb(255,80,80))
         }
 
+        # Stage M's output_marker is qc_report.json, which Part 1 (mechanical
+        # QC) always writes regardless of synthesis outcome - so the generic
+        # marker-based $finalStatus above can't tell whether --synthesize
+        # itself actually succeeded. Check that separately so a failed Opus
+        # call (bad auth, network, bad JSON) doesn't look like nothing
+        # happened, which is exactly the bug report that led here.
+        if ($useSynthesize -and $exitCode -ne 0) {
+            $script:SynthesisFailed = $true
+            Write-Log "Synthesis did not complete - narrative.json was not updated. See the stage output above for the reason (auth, network, or parsing failure)." ([System.Drawing.Color]::FromArgb(255,140,40))
+        }
+
         $doneCount++; $pgBar3.Value = $doneCount
         [System.Windows.Forms.Application]::DoEvents()
     }
@@ -1434,6 +1486,16 @@ function Start-StageRun {
     $btnCancelRun.Enabled     = $false
 
     Refresh-OutputsTree
+
+    # Surfaced separately from the per-stage grid/log lines above since
+    # Stage M can look like a success there (qc_report.json always gets
+    # written) even when synthesis itself failed - this is the one place
+    # that's unmissable even if the Run Log tab wasn't being watched live.
+    if ($script:SynthesisFailed) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Synthesis did not complete - narrative.json was not updated. See the Run Log tab for the specific reason (authentication, network, or parsing failure).",
+            'Run Selected + Synthesize', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    }
 }
 
 # =============================================================================
