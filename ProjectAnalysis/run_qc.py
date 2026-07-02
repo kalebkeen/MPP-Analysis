@@ -452,6 +452,17 @@ def _load_context_for_synthesis(output_root, cfg, qc_results):
     buyout_stage_breakdown = sb.to_dict(orient="records") if not sb.empty else []
     tp = _parquet(output_root / "stage_h" / "buyout_packages_ranked.parquet")
     top_packages = tp.head(5).to_dict(orient="records") if not tp.empty else []
+    # Definitive buyout scope signal from Stage H (rather than inferring it
+    # from empty tables). When false, Stage L omits Part VI entirely, so the
+    # part_vi_* fields Opus returns are ignored by the assembler - the prompt
+    # tells Opus to keep them to a single "not applicable" sentence.
+    bh_path = output_root / "stage_h" / "buyout_report.json"
+    buyout_scope = False
+    if bh_path.exists():
+        try:
+            buyout_scope = bool(json.loads(bh_path.read_text()).get("buyout_in_scope", False))
+        except Exception:
+            buyout_scope = False
 
     return {
         "project": project,
@@ -467,6 +478,7 @@ def _load_context_for_synthesis(output_root, cfg, qc_results):
         "float_bands": float_bands,
         "float_summary": fwd.get("float_summary", {}),
         "completion_range": comp_range,
+        "buyout_in_scope": buyout_scope,
         "buyout_summary": buyout_summary,
         "buyout_stage_breakdown": buyout_stage_breakdown,
         "top_packages": top_packages,
@@ -486,6 +498,7 @@ SYNTHESIS_PROMPT = """You are a construction project controls analyst writing th
 If a data section is empty or missing (for example, a project with no buyout scope configured has no buyout data at all - that's a legitimate configuration, not an error), say so plainly in the relevant field instead of fabricating content. A short, honest "No buyout scope was configured for this project" beats an invented paragraph.
 
 PROJECT: {project}  |  STATUS DATE: {status_date}
+BUYOUT IN SCOPE: {buyout_in_scope}  (if false, this project has no buyout phase — Part VI is omitted from the brief entirely; make each part_vi_* field the single sentence "No buyout scope was configured for this project." and do not invent buyout findings)
 
 TOP CONTROLLING RESOURCES (net days each controlled the forecast finish):
 {top_resources}
@@ -596,6 +609,7 @@ def run_synthesis(context, output_root, stage_j_dir):
     prompt = SYNTHESIS_PROMPT.format(
         project=context["project"],
         status_date=context["status_date"],
+        buyout_in_scope=context["buyout_in_scope"],
         top_resources=json.dumps(context["top_controlling_resources"], indent=2),
         controlling_timeline=json.dumps(context["controlling_timeline"], indent=2, default=str),
         ledger_totals=json.dumps(context["delay_ledger_totals"], indent=2),

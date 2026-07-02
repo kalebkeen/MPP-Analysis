@@ -61,6 +61,59 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
+def buyout_prefixes_configured(cfg: dict) -> list:
+    """The buyout WBS outline prefixes with blanks stripped. Empty list means
+    the project has no buyout phase — a first-class, supported state, NOT an
+    error. This is the primary 'no buyout scope' signal (config-blank);
+    zero packages matched despite configured prefixes is a secondary signal
+    handled in main() as a warning, not a failure."""
+    raw = cfg.get("schedule", {}).get("buyout_outline_prefixes", []) or []
+    return [str(p).strip() for p in raw if str(p).strip()]
+
+
+# Column schemas for the four buyout parquets, so an out-of-scope run can
+# write correctly-shaped empty frames that every downstream stage can read
+# without KeyError. Must match the frames build_buyout_analysis() produces.
+EMPTY_SUMMARY_COLS = ["bucket", "packages", "activities", "baseline_span",
+                      "actual_span", "abs_var", "pct_var", "largest_overrun"]
+EMPTY_PACKAGES_COLS = ["rank", "package_uid", "section", "group", "phase", "category",
+                       "sub_categories", "activities", "baseline", "actual", "abs_var",
+                       "pct_var", "actual_start", "actual_finish"]
+EMPTY_STAGE_COLS = ["stage", "occurrences", "avg_baseline", "avg_actual",
+                    "avg_var", "total_var", "median_start_slip"]
+EMPTY_DETAIL_COLS = ["section", "group", "phase", "category", "sub_category",
+                     "activity", "stage", "baseline", "actual", "abs_var",
+                     "pct_complete", "baseline_finish", "actual_finish",
+                     "start_slip", "is_lead_time"]
+
+
+def write_out_of_scope_outputs(stage_dir: Path, project_name: str, snapshot_stem: str, reason: str):
+    """Write empty-but-valid Stage H outputs plus a report with
+    buyout_in_scope=false, so downstream stages (K/L/M) have a definitive
+    'no buyout' signal rather than a missing file. No styled workbook is
+    produced — there is nothing to tabulate."""
+    pd.DataFrame(columns=EMPTY_SUMMARY_COLS).to_parquet(stage_dir / "buyout_summary.parquet", index=False)
+    pd.DataFrame(columns=EMPTY_PACKAGES_COLS).to_parquet(stage_dir / "buyout_packages_ranked.parquet", index=False)
+    pd.DataFrame(columns=EMPTY_STAGE_COLS).to_parquet(stage_dir / "buyout_stage_breakdown.parquet", index=False)
+    pd.DataFrame(columns=EMPTY_DETAIL_COLS).to_parquet(stage_dir / "buyout_activity_detail.parquet", index=False)
+    report = {
+        "buyout_in_scope": False,
+        "out_of_scope_reason": reason,
+        "buyout_leaf_count": 0,
+        "package_count": 0,
+        "stage_distribution": {},
+        "bucket_count": 0,
+        "total_baseline_span": 0,
+        "total_actual_span": 0,
+        "total_abs_var": 0,
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "project": project_name,
+        "snapshot": snapshot_stem,
+    }
+    with open(stage_dir / "buyout_report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, default=str)
+
+
 def find_snapshot(cfg: dict, snapshot_arg: str | None) -> Path:
     output_root = Path(cfg["paths"]["output_root"])
     snap_dir = output_root / "stage_c" / "snapshots"
@@ -491,6 +544,24 @@ def main():
     stage_dir = output_root / "stage_h"
     stage_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Buyout-optional gate (config-blank = no buyout phase) ─────────────
+    # A project with no buyout scope leaves schedule.buyout_outline_prefixes
+    # blank. That is a supported, first-class state: skip cleanly with a
+    # definitive out-of-scope marker rather than requiring dummy inputs or
+    # failing downstream. This must run BEFORE the Stage D dependency check,
+    # because a no-buyout project has nothing for Stage D to resolve either.
+    if not buyout_prefixes_configured(cfg):
+        snap_stem = ""
+        try:
+            snap_stem = find_snapshot(cfg, args.snapshot).stem
+        except Exception:
+            pass
+        write_out_of_scope_outputs(stage_dir, project_name, snap_stem,
+                                   "no buyout scope configured")
+        print("Stage H skipped — no buyout scope configured "
+              "(schedule.buyout_outline_prefixes is blank).")
+        return 0
+
     stage_d_dir = output_root / "stage_d"
     grouping_path = stage_d_dir / "buyout_grouping.parquet"
     packages_path = stage_d_dir / "buyout_packages.parquet"
@@ -511,6 +582,22 @@ def main():
 
     res = build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg)
 
+    # Secondary out-of-scope detection: prefixes were configured, but zero
+    # buyout packages actually matched (e.g. wrong prefix, or the buyout
+    # branch was removed from the schedule). Per the spec this WARNS rather
+    # than fails, and still emits buyout_in_scope=false so the downstream
+    # brief omits Part VI cleanly instead of rendering an empty shell.
+    package_count = len(res["packages"])
+    if package_count == 0:
+        print("Stage H warning: buyout prefixes are configured but zero buyout "
+              "packages matched — treating buyout as out of scope for this brief.")
+        write_out_of_scope_outputs(stage_dir, project_name, snapshot_path.stem,
+                                   "buyout prefixes configured but zero packages matched")
+        print(f"\n{'='*60}")
+        print(f"  Stage H — no buyout packages; wrote out-of-scope marker.")
+        print(f"{'='*60}\n")
+        return 0
+
     # ── persist ───────────────────────────────────────────────────────────
     res["summary"].to_parquet(stage_dir / "buyout_summary.parquet", index=False)
     res["packages"].to_parquet(stage_dir / "buyout_packages_ranked.parquet", index=False)
@@ -521,6 +608,7 @@ def main():
     write_workbook(xlsx_path, cfg, res)
 
     report = res["report"]
+    report["buyout_in_scope"] = True
     report["generated"] = datetime.now().isoformat(timespec="seconds")
     report["project"] = project_name
     report["snapshot"] = snapshot_path.stem

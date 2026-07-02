@@ -81,6 +81,11 @@ $script:CancelRequested   = $false
 $script:RunningStageCode  = ''
 $script:StageRunActive    = $false
 $script:CurrentProcess    = $null
+# One-time-per-session hint before the first Synthesize click, so a new user
+# learns Synthesize needs the (unbundled) Claude Code CLI installed + logged in
+# on this machine before they hit the auth-failure path. Declared here because
+# Set-StrictMode -Version Latest throws on reading an uninitialized variable.
+$script:SynthHintShown    = $false
 
 # Stage definitions in pipeline order (matches the Tab 2 checklist / Run All order)
 # Description is one-line summary text shown in the Tab 2 grid only — pulled
@@ -100,6 +105,33 @@ $script:Stages = @(
 
 # pip package name -> python import name, only where they differ
 $script:PipImportMap = @{ 'jpype1' = 'jpype' }
+
+# Deep venv smoke test. A plain "import X" per package is NOT enough: an
+# interrupted wheel extraction can leave a stub package dir where the import
+# succeeds as an empty namespace package (__file__ is None) - that exact state
+# once made every pipeline stage die inside pandas' pyarrow compat shim while
+# the old per-import check still reported the venv healthy. This imports every
+# bootstrap package for real AND requires each to have a __file__. Module list
+# must stay in lockstep with pip_packages in Get-DefaultConfig and with the
+# same one-liner in PA-Pipeline-Setup.cs (VENV_SMOKE_TEST_CODE).
+$script:VenvSmokeTestCode = "import mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,sys; [sys.exit('CORRUPT:'+m.__name__) for m in (mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber) if getattr(m,'__file__',None) is None]; print('SMOKE-OK')"
+
+# Strip any ==version pin, then map pip name -> import name.
+function Get-PipImportName {
+    param([string]$PipSpec)
+    $name = ($PipSpec -split '==')[0].Trim()
+    if ($script:PipImportMap.ContainsKey($name)) { return $script:PipImportMap[$name] }
+    return $name
+}
+
+function Invoke-VenvSmokeTest {
+    # Returns $true if every bootstrap package imports AND is a real (non-stub)
+    # install. Callers that need per-package detail use the Env Check's own
+    # per-package loop; this is the cheap pass/fail gate for install/repair.
+    param([string]$VenvPython)
+    & $VenvPython '-c' $script:VenvSmokeTestCode *> $null
+    return ($LASTEXITCODE -eq 0)
+}
 
 # =============================================================================
 # HELPER: Write text as UTF-8 with NO byte-order-mark.
@@ -206,15 +238,10 @@ function Get-DefaultConfig {
         }
         critical_path = [ordered]@{
             concurrent_paths_threshold_days = 3
-            incomplete_only                 = $true
-            min_duration_days               = 1
-            ledger_window_weeks             = 4
         }
         charting = [ordered]@{
             dpi          = 150
             font_family  = 'Carlito'
-            navy_hex     = '#1F4E78'
-            alert_red_hex = '#C00000'
             float_health_bands_days        = @(0, 5, 10, 20)
             completion_range_lookback_weeks = 8
             forecast_trend_chart = [ordered]@{ annotation_breakpoints = @() }
@@ -237,10 +264,7 @@ function Get-DefaultConfig {
         }
         qc = [ordered]@{
             uid_persistence_warn_threshold_pct = 99.0
-            zero_baseline_warn_threshold       = 50
-            name_uid_gap_warn_pct              = 1.0
             negative_variance_watch_buildings  = @()
-            synthesize_with_opus               = $false
         }
         pdf_assembly = [ordered]@{
             brief_title           = 'Executive Schedule Brief'
@@ -271,9 +295,17 @@ function Get-DefaultConfig {
             # just the size (e.g. "2g", "512m") - start_jvm() in extract_snapshots.py
             # prepends the -Xmx itself.
             jvm_max_heap        = ''
+            # Pinned exact versions, deliberately. Floating versions + an
+            # interrupted wheel extraction during install once produced a venv
+            # where "import pyarrow" succeeded (an empty stub package dir was
+            # left behind) but the module had no contents - fatal to pandas at
+            # import in every stage, and invisible to a plain import check.
+            # Must stay in lockstep with Program.PipPackages in
+            # PA-Pipeline-Setup.cs and with $script:VenvSmokeTestCode's module
+            # list below.
             pip_packages = @(
-                'mpxj','jpype1','pandas','pyarrow','openpyxl',
-                'matplotlib','reportlab','pypdf','pikepdf','pdfplumber'
+                'mpxj==16.4.1','jpype1==1.7.1','pandas==3.0.3','pyarrow==24.0.0','openpyxl==3.1.5',
+                'matplotlib==3.11.0','reportlab==5.0.0','pypdf==6.14.2','pikepdf==10.9.1','pdfplumber==0.11.10'
             )
         }
         # Output markers below match the filenames the scripts actually write.
@@ -613,7 +645,7 @@ $tabSetup.Controls.Add($gbSchedule)
 $gbSchedule.Controls.Add((New-Label 'Buyout Outline Prefix(es):' 10 28 185))
 $tbBuyoutPrefixes = New-Textbox 198 26 160
 $gbSchedule.Controls.Add($tbBuyoutPrefixes)
-$lblBuyoutHint = New-Label '(e.g. 1   or   1, 3.2 for scattered branches)' 362 28 175
+$lblBuyoutHint = New-Label '(e.g. 1   or   1, 3.2 for scattered branches — leave blank if the project has no buyout phase)' 362 28 580
 $lblBuyoutHint.ForeColor = [System.Drawing.Color]::Gray
 $lblBuyoutHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
 $gbSchedule.Controls.Add($lblBuyoutHint)
@@ -713,13 +745,13 @@ $lblBucketsHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
 $gbCV.Controls.Add($lblBucketsHint)
 
 # ── WBS Resolver ─────────────────────────────────────────────────────────
-$gbWbs = New-GroupBox 'WBS Resolver  (MS Project outline numbering — required by stage D)' 12 772 1000 116
+$gbWbs = New-GroupBox 'WBS Resolver  (MS Project outline numbering — leave all fields blank if the project has no buyout phase)' 12 772 1000 116
 $tabSetup.Controls.Add($gbWbs)
 
 $gbWbs.Controls.Add((New-Label 'Buyout Work Outline Prefix:' 10 28 180))
 $tbBuyoutWorkPrefix = New-Textbox 194 26 120
 $gbWbs.Controls.Add($tbBuyoutWorkPrefix)
-$gbWbs.Controls.Add((New-Label '(e.g. 1.1)' 320 28 90))
+$gbWbs.Controls.Add((New-Label '(e.g. 1.1 — blank if no buyout)' 320 28 100))
 
 $gbWbs.Controls.Add((New-Label 'Lead-Time Outline Prefix:' 430 28 160))
 $tbLeadTimePrefix = New-Textbox 594 26 120
@@ -1217,6 +1249,20 @@ $btnRunSynthesize.Add_Click({
     # checked - failing fast here saves running every other selected stage
     # first only to discover synthesis can't work at the very end.
     if ($selected | Where-Object { $_.Code -eq 'M' }) {
+        # First-click-per-session hint: Synthesize depends on the Claude Code
+        # CLI, which this app deliberately does NOT bundle or store credentials
+        # for. Surface that once, up front, rather than only via the auth-error
+        # path, so a new user knows it's a one-time external setup.
+        if (-not $script:SynthHintShown) {
+            $script:SynthHintShown = $true
+            [System.Windows.Forms.MessageBox]::Show(
+                "Synthesize uses Opus to write the brief's narrative, via the Claude Code CLI installed and logged in on THIS machine — a one-time setup this app does not bundle." + [Environment]::NewLine + [Environment]::NewLine +
+                "If it isn't set up yet: install Claude Code, then run 'claude setup-token' (or 'claude login') once in a terminal. No API key or account info is ever stored by this app." + [Environment]::NewLine + [Environment]::NewLine +
+                "See the Settings tab for details. Click OK to continue.",
+                'Synthesize — one-time setup',
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information)
+        }
         $authCheck = Test-ClaudeCliAuth
         if (-not $authCheck.Ok) {
             [System.Windows.Forms.MessageBox]::Show($authCheck.Message,'Run Selected + Synthesize',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -1627,8 +1673,10 @@ $gbVenv.Controls.Add($lblVenvStatusVal)
 
 $btnCreateVenv      = New-Btn 'Create Venv'      10  92 160 30 ([System.Drawing.Color]::FromArgb(31,78,120))
 $btnInstallPackages = New-Btn 'Install Packages' 180 92 170 30 ([System.Drawing.Color]::FromArgb(31,78,120))
+$btnRepairPackages  = New-Btn 'Repair Packages'  360 92 170 30 ([System.Drawing.Color]::FromArgb(140,80,30))
 $gbVenv.Controls.Add($btnCreateVenv)
 $gbVenv.Controls.Add($btnInstallPackages)
+$gbVenv.Controls.Add($btnRepairPackages)
 
 $lblVenvActionStatus = New-Label '' 10 130 970 30
 $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(80,80,100)
@@ -1693,6 +1741,20 @@ function Get-ResolvedSystemPython {
 # ── Environment Check ───────────────────────────────────────────────────────
 $gbEnvCheck = New-GroupBox 'Environment Check' 12 364 1000 400
 $tabSettings.Controls.Add($gbEnvCheck)
+
+# ── Synthesize (Opus narrative) — external dependency note ────────────────
+# Synthesize is the one feature this app does NOT self-contain: it shells out
+# to the Claude Code CLI, which is not bundled and stores no credentials here.
+# A fresh install on any machine has Synthesize dark until that machine's user
+# installs the CLI and logs in once. This note makes that visible in-app.
+$gbSynthNote = New-GroupBox 'Synthesize (Opus narrative) — one-time external setup' 12 772 1000 132
+$tabSettings.Controls.Add($gbSynthNote)
+$lblSynthNote = New-Label ("The ""Run Selected + Synthesize"" button on Tab 2 uses Opus to write the brief's narrative sections. It calls the Claude Code CLI installed on THIS machine — the app does not bundle it and never stores an API key or account information." + [Environment]::NewLine + [Environment]::NewLine +
+    "One-time setup on each machine that will use Synthesize:" + [Environment]::NewLine +
+    "   1. Install Claude Code (https://claude.ai/install.ps1)." + [Environment]::NewLine +
+    "   2. In a terminal, run  claude setup-token  (or  claude login ) once and complete the browser login." + [Environment]::NewLine + [Environment]::NewLine +
+    "Every other stage (C–L, mechanical QC) runs fully offline with the bundled Python/Java — only Synthesize needs this.") 12 26 976 96
+$gbSynthNote.Controls.Add($lblSynthNote)
 
 $btnRunEnvCheck = New-Btn 'Run Environment Check' 10 26 200 32 ([System.Drawing.Color]::FromArgb(70,100,140))
 $gbEnvCheck.Controls.Add($btnRunEnvCheck)
@@ -1865,6 +1927,7 @@ $btnInstallPackages.Add_Click({
 
     $btnCreateVenv.Enabled = $false
     $btnInstallPackages.Enabled = $false
+    $btnRepairPackages.Enabled = $false
     $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(80,80,100)
     $lblVenvActionStatus.Text = 'Installing packages — this can take a few minutes…'
     [System.Windows.Forms.Application]::DoEvents()
@@ -1875,17 +1938,66 @@ $btnInstallPackages.Add_Click({
         [System.Windows.Forms.Application]::DoEvents()
     }
 
-    if ($exitCode -eq 0) {
+    # pip exit 0 is necessary but not sufficient - a prior interrupted install
+    # can leave stub packages pip considers satisfied. Only the deep smoke test
+    # earns the green status.
+    if ($exitCode -eq 0 -and (Invoke-VenvSmokeTest -VenvPython $pyExe)) {
         $script:Config.environment.packages_installed = $true
         Save-ProjectConfig
         $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(20,120,40)
-        $lblVenvActionStatus.Text = 'Packages installed successfully.'
+        $lblVenvActionStatus.Text = 'Packages installed and verified (import smoke test passed).'
+    } elseif ($exitCode -eq 0) {
+        $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(190,30,30)
+        $lblVenvActionStatus.Text = 'Environment damaged — install finished but packages fail to import. Click Repair Packages to rebuild.'
     } else {
         $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(190,30,30)
         $lblVenvActionStatus.Text = "Package install failed (exit code $exitCode)."
     }
     $btnCreateVenv.Enabled = $true
     $btnInstallPackages.Enabled = $true
+    $btnRepairPackages.Enabled = $true
+})
+
+$btnRepairPackages.Add_Click({
+    if ($null -eq $script:Config) { return }
+    $pyExe = [string]$script:Config.paths.python_exe
+    if (-not (Test-Path -LiteralPath $pyExe)) {
+        [System.Windows.Forms.MessageBox]::Show('Create the venv first.','Repair Packages',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    $packages = (@($script:Config.environment.pip_packages) -join ' ')
+
+    $btnCreateVenv.Enabled = $false
+    $btnInstallPackages.Enabled = $false
+    $btnRepairPackages.Enabled = $false
+    $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(80,80,100)
+    $lblVenvActionStatus.Text = 'Repairing packages — this can take a few minutes…'
+    [System.Windows.Forms.Application]::DoEvents()
+
+    # --ignore-installed, NOT --force-reinstall: force-reinstall runs pip's
+    # uninstall step first, which hard-fails on exactly the damage being
+    # repaired ("Cannot uninstall pyarrow None ... no RECORD file was found"
+    # - observed verbatim on a real corrupted venv). --ignore-installed skips
+    # the uninstall and re-extracts every pinned wheel over the top, which is
+    # idempotent and repairs partial extractions.
+    $exitCode = Invoke-NativeProcessWithStatus -FileName $pyExe -Arguments "-m pip install --ignore-installed $packages" -OnLine {
+        param($line)
+        $lblVenvActionStatus.Text = $line
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    if ($exitCode -eq 0 -and (Invoke-VenvSmokeTest -VenvPython $pyExe)) {
+        $script:Config.environment.packages_installed = $true
+        Save-ProjectConfig
+        $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(20,120,40)
+        $lblVenvActionStatus.Text = 'Repair complete — all packages verified (import smoke test passed).'
+    } else {
+        $lblVenvActionStatus.ForeColor = [System.Drawing.Color]::FromArgb(190,30,30)
+        $lblVenvActionStatus.Text = 'Repair did not restore a healthy environment. Delete the venv folder and use Create Venv + Install Packages to rebuild from scratch.'
+    }
+    $btnCreateVenv.Enabled = $true
+    $btnInstallPackages.Enabled = $true
+    $btnRepairPackages.Enabled = $true
 })
 
 $btnRunEnvCheck.Add_Click({
@@ -1964,17 +2076,31 @@ $btnRunEnvCheck.Add_Click({
     if ($venvOk) { [void]$lstEnvResults.Items.Add("✓ Venv exists: $venvPyExe") }
     else         { [void]$lstEnvResults.Items.Add("✗ Venv not found: $venvPyExe") }
 
-    # Check 4: all pip_packages importable in venv python
+    # Check 4: every pip_package imports AND is a real (non-stub) install.
+    # This is the fourth failure state (beyond bootstrap-Python, Java, and
+    # missing-venv): a venv that EXISTS but is DAMAGED. A package left as an
+    # empty stub by an interrupted wheel extraction imports fine yet has no
+    # __file__ - the exact failure that killed a real run inside pandas'
+    # pyarrow shim. Each package is classified as OK / missing / corrupted so
+    # "reinstall the app" (missing runtime) is distinguishable from "click
+    # Repair Packages" (damaged venv).
     if ($venvOk) {
-        $missing = @()
+        $missing   = @()
+        $corrupted = @()
         foreach ($pkg in @($script:Config.environment.pip_packages)) {
-            $importName = $pkg
-            if ($script:PipImportMap.ContainsKey($pkg)) { $importName = $script:PipImportMap[$pkg] }
-            & $venvPyExe '-c' "import $importName" *> $null
-            if ($LASTEXITCODE -ne 0) { $missing += $pkg }
+            $importName = Get-PipImportName $pkg
+            $probe = "import $importName as _m; import sys; sys.exit(2 if getattr(_m,'__file__',None) is None else 0)"
+            & $venvPyExe '-c' $probe *> $null
+            $rc = $LASTEXITCODE
+            if     ($rc -eq 2) { $corrupted += (($pkg -split '==')[0]) }
+            elseif ($rc -ne 0) { $missing   += (($pkg -split '==')[0]) }
         }
-        if ($missing.Count -eq 0) { [void]$lstEnvResults.Items.Add('✓ All packages importable in venv') }
-        else                       { [void]$lstEnvResults.Items.Add("✗ Packages not importable: $($missing -join ', ')") }
+        if ($corrupted.Count -eq 0 -and $missing.Count -eq 0) {
+            [void]$lstEnvResults.Items.Add('✓ All packages importable and verified in venv')
+        } else {
+            if ($missing.Count -gt 0)   { [void]$lstEnvResults.Items.Add("✗ Packages not importable (reinstall or use Install Packages): $($missing -join ', ')") }
+            if ($corrupted.Count -gt 0) { [void]$lstEnvResults.Items.Add("✗ Environment damaged — corrupted packages (click Repair Packages on the Venv panel): $($corrupted -join ', ')") }
+        }
     } else {
         [void]$lstEnvResults.Items.Add('✗ Packages importable: skipped (no venv)')
     }

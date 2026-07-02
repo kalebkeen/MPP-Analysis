@@ -268,6 +268,22 @@ def _load_parquet(path):
     return pd.DataFrame()
 
 
+def buyout_in_scope(output_root) -> bool:
+    """Read Stage H's definitive out-of-scope signal. Part VI (buyout) is
+    included only when Stage H reported buyout_in_scope=true. A missing or
+    unreadable report is treated as out of scope, so a no-buyout project (or a
+    project where Stage H was skipped) produces a clean brief with no empty
+    Part VI shell. Stage H writes buyout_in_scope=false explicitly whenever
+    the project has no buyout phase."""
+    rpt = output_root / "stage_h" / "buyout_report.json"
+    if not rpt.exists():
+        return False
+    try:
+        return bool(json.loads(rpt.read_text(encoding="utf-8")).get("buyout_in_scope", False))
+    except Exception:
+        return False
+
+
 def _chart(path, width=BODY_W, caption=None, ST=None):
     """Return [Image, caption_para] flowables if the PNG exists."""
     out = []
@@ -897,8 +913,17 @@ def main():
     narrative = load_narrative(output_root)
     kpis      = derive_kpis(output_root, cfg)
 
+    # Buyout is optional. When the project has no buyout phase, Stage H writes
+    # buyout_in_scope=false and Part VI drops out of the document entirely —
+    # TOC entry, bookmark, and body — rather than rendering an empty shell.
+    # SECTION_TITLES stays the single source of truth; Part VI is a conditional
+    # include, never a second title list. No renumbering is needed: Part VI is
+    # the last numbered part, so omitting it leaves a clean I–V + Appendix A.
+    include_part_vi = buyout_in_scope(output_root)
+
     print(f"  KPIs derived: {kpis}")
-    print(f"  Narrative keys: {list(narrative.keys()) or ['(none — placeholders will be used)']}\n")
+    print(f"  Narrative keys: {list(narrative.keys()) or ['(none — placeholders will be used)']}")
+    print(f"  Part VI (buyout): {'included' if include_part_vi else 'omitted — no buyout scope'}\n")
 
     # (title, bookmark_key, fallback_page) — fallback is only used if a section's
     # bookmark somehow never recorded a page (defensive; shouldn't happen since
@@ -913,6 +938,8 @@ def main():
         (SECTION_TITLES["part_vi"],      "part_vi",   25),
         (SECTION_TITLES["appendix_a"],   "appendix_a",32),
     ]
+    if not include_part_vi:
+        TOC_SECTIONS = [t for t in TOC_SECTIONS if t[1] != "part_vi"]
 
     def build_story(section_pages=None):
         """Fresh flowables every call — Platypus flowables are stateful.
@@ -928,7 +955,8 @@ def main():
         s += mark("part_iii")   + section_part_iii(output_root, narrative, ST, cfg)
         s += mark("part_iv")    + section_part_iv(output_root, narrative, ST, cfg)
         s += mark("part_v")     + section_part_v(narrative, ST)
-        s += mark("part_vi")    + section_part_vi(output_root, narrative, ST, cfg)
+        if include_part_vi:
+            s += mark("part_vi") + section_part_vi(output_root, narrative, ST, cfg)
         s += mark("appendix_a") + section_appendix_a(output_root, narrative, ST)
         return s
 

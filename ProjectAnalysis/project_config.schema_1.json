@@ -94,10 +94,7 @@
   // Controls driving-path tracing and concurrency detection.
   // ----------------------------------------------------------
   "critical_path": {
-    "incomplete_only":                    true,  // Only trace incomplete construction tasks
-    "concurrent_paths_threshold_days":    3,     // Activities finishing within N days of controller → flagged concurrent
-    "min_duration_days":                  1,     // Tasks shorter than this excluded from driving path consideration
-    "ledger_window_weeks":                4      // Rolling window size for the weekly delay ledger
+    "concurrent_paths_threshold_days":    3      // Activities finishing within N days of controller → flagged concurrent
   },
 
   // ----------------------------------------------------------
@@ -140,8 +137,6 @@
   "charting": {
     "dpi":                    150,               // Output resolution for all PNGs
     "font_family":            "Carlito",         // Primary chart font — fallback to Calibri if unavailable
-    "navy_hex":               "#1F4E78",         // Primary brand color
-    "alert_red_hex":          "#C00000",         // Used for Critical float band, negative variance
     "forecast_trend_chart": {
       "annotation_breakpoints": []               // List of {week, label} dicts — app lets user add these in Tab 2
     }
@@ -167,10 +162,7 @@
   // ----------------------------------------------------------
   "qc": {
     "uid_persistence_warn_threshold_pct":  99.0, // % UID survival across snapshots — warn if below
-    "zero_baseline_warn_threshold":        50,   // Count of zero-baseline lines before QC flags
-    "name_uid_gap_warn_pct":               1.0,  // % gap between name-based and UID-based variance — warn if above
-    "negative_variance_watch_buildings":   [],   // Pre-populated by Stage M first run — e.g. ["B05","B08"]
-    "synthesize_with_opus":                false // True = Stage M calls Opus for synthesis paragraphs (--synthesize flag)
+    "negative_variance_watch_buildings":   []    // Pre-populated by Stage M first run — e.g. ["B05","B08"]
   },
 
   // ----------------------------------------------------------
@@ -184,17 +176,17 @@
     "packages_installed":     false,             // Set true after pip install completes
     "last_env_check":         "",                // ISO datetime of last Tab 5 environment check
     "java_home":              "",                // JAVA_HOME override — blank = use system PATH
-    "pip_packages": [
-      "mpxj",
-      "jpype1",
-      "pandas",
-      "pyarrow",
-      "openpyxl",
-      "matplotlib",
-      "reportlab",
-      "pypdf",
-      "pikepdf",
-      "pdfplumber"
+    "pip_packages": [                              // pinned exact versions — reproducible, self-verifying install
+      "mpxj==16.4.1",
+      "jpype1==1.7.1",
+      "pandas==3.0.3",
+      "pyarrow==24.0.0",
+      "openpyxl==3.1.5",
+      "matplotlib==3.11.0",
+      "reportlab==5.0.0",
+      "pypdf==6.14.2",
+      "pikepdf==10.9.1",
+      "pdfplumber==0.11.10"
     ]
   },
 
