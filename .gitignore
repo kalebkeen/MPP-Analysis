@@ -1,0 +1,8 @@
+# Build OUTPUT — not tracked; installers are attached to GitHub Releases
+# instead (per 2026-07-03 decision). The large build INPUTS the installer
+# embeds (python-*.exe, temurin-*.zip, carlito-fonts.zip) stay tracked so
+# a fresh clone can still build.
+ProjectAnalysis/PA-Pipeline-Setup.exe
+# Local dev conveniences
+ProjectAnalysis/__pycache__/
+ProjectAnalysis/fonts/
