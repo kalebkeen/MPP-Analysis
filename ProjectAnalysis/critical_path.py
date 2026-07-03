@@ -104,9 +104,15 @@ def is_buyout_outline(outline_number, buyout_prefixes) -> bool:
 
 _DATE_PATTERNS = [
     # (regex, (year_group, month_group, day_group), year_is_2digit)
-    (re.compile(r"(20\d{2})[-._](\d{1,2})[-._](\d{1,2})"), (1, 2, 3), False),
-    (re.compile(r"(\d{1,2})[-._](\d{1,2})[-._](20\d{2})"), (3, 1, 2), False),
-    (re.compile(r"(\d{1,2})[-._](\d{1,2})[-._](\d{2})(?!\d)"), (3, 1, 2), True),
+    # Separators allow 1-2 chars: real snapshot files carry typos like
+    # "3.19..26" (double dot), which a single-separator pattern misses —
+    # and a missed filename date silently falls back to file-modification
+    # time, which is meaningless after Stage B's COM export re-saves every
+    # file (observed: 98 New Town files all re-saved on the same day, so
+    # both LastSaved and mtime carry the export date, not the snapshot date).
+    (re.compile(r"(20\d{2})[-._]{1,2}(\d{1,2})[-._]{1,2}(\d{1,2})"), (1, 2, 3), False),
+    (re.compile(r"(\d{1,2})[-._]{1,2}(\d{1,2})[-._]{1,2}(20\d{2})"), (3, 1, 2), False),
+    (re.compile(r"(\d{1,2})[-._]{1,2}(\d{1,2})[-._]{1,2}(\d{2})(?!\d)"), (3, 1, 2), True),
 ]
 
 

@@ -57,6 +57,10 @@ from openpyxl.chart.shapes import GraphicalProperties
 # House style
 # ---------------------------------------------------------------------------
 
+# Optional snapshot-order manifest (set from --manifest in main), consumed by
+# the multi-snapshot data functions via discover_snapshots.
+MANIFEST_PATH = None
+
 NAVY = "#1F4E78"
 RED = "#C0392B"      # adds days
 GREEN = "#27632A"    # recovers days
@@ -206,7 +210,10 @@ def _data_bucket_trajectories(cfg, paths, project):
         print("    [skip] bucket_trajectories — needs construction_variance.py + critical_path.py")
         return None, None
     try:
-        snaps = discover_snapshots(cfg, None)
+        # MANIFEST_PATH mirrors Stage F/G's --manifest: without it, a snapshot
+        # whose filename carries no parseable date silently orders by file
+        # mtime, which is the COM-export date, not the snapshot date.
+        snaps = discover_snapshots(cfg, MANIFEST_PATH)
     except Exception as e:
         print(f"    [skip] bucket_trajectories — {e}")
         return None, None
@@ -685,9 +692,13 @@ def write_chart_workbook(results, cfg, out_dir):
 # ---------------------------------------------------------------------------
 
 def main():
+    global MANIFEST_PATH
     parser = argparse.ArgumentParser(description="Stage K — generate the seven core charts")
     parser.add_argument("--config", default="project_config.json")
+    parser.add_argument("--manifest", default=None,
+                        help="Optional snapshot-order CSV (stem,date), same as Stage F/G")
     args = parser.parse_args()
+    MANIFEST_PATH = args.manifest
 
     cfg = load_config(args.config)
     project = cfg["project"]["name"]
