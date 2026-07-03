@@ -242,6 +242,14 @@ def build_construction_variance(tasks_df: pd.DataFrame, cfg: dict):
 
         phase = bld_phase.get(bucket, "") if bucket in building_names else ""
 
+        # In-progress rule (work plan 5.4, Methodology A): completed lines use
+        # actuals; any line with an incomplete instance takes its span to the
+        # current scheduled finish, so its variance is a FORECAST that moves as
+        # work completes. The flag makes that basis visible per row.
+        incomplete = int((grp["pct_complete"].fillna(0) < 100).sum())
+        basis = "actual" if incomplete == 0 else (
+            "forecast" if (grp["actual_start"].notna().any()) else "not started")
+
         rows.append({
             "bucket":        bucket,
             "phase":         phase,
@@ -252,6 +260,7 @@ def build_construction_variance(tasks_df: pd.DataFrame, cfg: dict):
             "actual_span":   round(act_span, 1),
             "abs_variance":  round(abs_var, 1),
             "pct_variance":  pct_var,
+            "span_basis":    basis,
         })
 
     full_df = pd.DataFrame(rows)
@@ -371,7 +380,7 @@ def _style_variance_sheet(ws, title, subtitle, df, text_cols):
 
     header_row = 4
     trailing = ["Instances", "Baseline Span (d)", "Actual Span (d)",
-                "Abs Var (d)", "% Var"]
+                "Abs Var (d)", "% Var", "Basis"]
     headers = [h for h, _ in text_cols] + trailing
     n_text = len(text_cols)
     n_cols = len(headers)
@@ -382,6 +391,7 @@ def _style_variance_sheet(ws, title, subtitle, df, text_cols):
     col_actual = n_text + 3
     col_absvar = n_text + 4
     col_pct = n_text + 5
+    col_basis = n_text + 6
     L_base = get_column_letter(col_baseline)
     L_act = get_column_letter(col_actual)
     L_abs = get_column_letter(col_absvar)
@@ -450,6 +460,14 @@ def _style_variance_sheet(ws, title, subtitle, df, text_cols):
         cell.font = base_font
         cell.number_format = "0.0%"
         cell.alignment = Alignment(horizontal="right")
+        if fill:
+            cell.fill = fill
+
+        # Span basis (5.4 in-progress rule): actual / forecast / not started —
+        # forecast rows move as work completes, and the reader should know which.
+        cell = ws.cell(row=r, column=col_basis, value=str(rec.get("span_basis", "")))
+        cell.font = base_font
+        cell.alignment = Alignment(horizontal="center")
         if fill:
             cell.fill = fill
 

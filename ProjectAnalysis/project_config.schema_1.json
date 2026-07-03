@@ -27,7 +27,8 @@
   // ----------------------------------------------------------
   "paths": {
     "snapshots_dir":      "C:\\SCI\\Projects\\Harrison\\Snapshots",   // Folder of weekly MPP/XML exports (Stage C reads here)
-    "baseline_mpp":       "C:\\SCI\\Projects\\Harrison\\Baseline\\Harrison_Baseline.xml", // Baseline-bearing file (Stage E, H read this)
+    "baseline_mpp":       "",                    // UNUSED — read by no stage (baselines come from within each snapshot); kept pending Playbook Stage E decision
+    "prior_brief":        "",                    // Optional: prior run's stage_j/narrative.json — enables the what-changed dashboard element
     "output_dir":         "C:\\SCI\\Projects\\Harrison\\Analysis",    // Root output folder — all stage subdirs created here
     "venv_dir":           "C:\\Program Files\\PA-Pipeline\\venv",     // Managed venv — written by installer, read-only in config
     "python_exe":         "C:\\Program Files\\PA-Pipeline\\venv\\Scripts\\python.exe" // Resolved venv python — set by installer
@@ -94,7 +95,8 @@
   // Controls driving-path tracing and concurrency detection.
   // ----------------------------------------------------------
   "critical_path": {
-    "concurrent_paths_threshold_days":    3      // Activities finishing within N days of controller → flagged concurrent
+    "concurrent_paths_threshold_days":    3,     // Activities finishing within N days of controller → flagged concurrent
+    "attribution_convention":             "later" // "later" (canonical windows) or "earlier" (incumbent) — Stage F writes attribution_comparison.parquet either way
   },
 
   // ----------------------------------------------------------
@@ -117,15 +119,14 @@
   // Controls package classifier and output table sizing.
   // ----------------------------------------------------------
   "buyout_analysis": {
-    "stage_classification": [
-      "Order/Procurement",
-      "Subcontract Award",
-      "Submittal/Approval",
-      "Lead-Time/Delivery",
-      "Milestone",
-      "Other"
-    ],                                            // Priority-ordered — first match wins
-    "stage_fallback":         "Other",            // Assigned when no keyword matches
+    "stage_classification": [                     // Priority-ordered {stage, keywords} dicts — first keyword match wins.
+      { "stage": "Decision / setup",              "keywords": ["selection", "decided", "bid", "quote", "lead time determined", "distribution"] },
+      { "stage": "Purchase-order cycle",          "keywords": ["order"] },
+      { "stage": "Subcontract execution",         "keywords": ["subcontract", "contract"] },
+      { "stage": "Submittal approval",            "keywords": ["submittal", "approv"] },
+      { "stage": "Package close-out / milestone", "keywords": ["bought", "complete", "milestone"] }
+    ],                                            // Defaults = canonical Methodology D.4 taxonomy; adjust per project naming
+    "stage_fallback":         "Unclassified",     // No keyword matched — Stage H reports % unclassified as a QC line
     "top_packages_count":     25,                 // Rows in Top Packages sheet
     "summary_span_metric":    "summary_task"      // "summary_task" (correct) vs "leaf_sum" (inflated — do not use)
   },
@@ -137,6 +138,7 @@
   "charting": {
     "dpi":                    150,               // Output resolution for all PNGs
     "font_family":            "Carlito",         // Primary chart font — fallback to Calibri if unavailable
+    "legend_max_series":      10,                // Driving-resource scatter: subs beyond top N group into "Other"
     "forecast_trend_chart": {
       "annotation_breakpoints": []               // List of {week, label} dicts — app lets user add these in Tab 2
     }

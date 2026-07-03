@@ -187,7 +187,10 @@ def build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg):
     """Returns dict of result DataFrames + report."""
     ba = cfg["buyout_analysis"]
     stage_defs = ba["stage_classification"]
-    fallback = ba.get("stage_fallback", "Other")
+    # "Unclassified" is a first-class bucket, not a rug: a project whose task
+    # naming doesn't match the configured keywords should fail LOUDLY (high
+    # unclassified %) instead of misfiling silently into a generic stage.
+    fallback = ba.get("stage_fallback", "Unclassified")
     top_n = ba.get("top_packages_count", 25)
     min_base = cfg["construction_variance"].get("baseline_span_min_days", 0.5)
     cal = cfg.get("working_calendar", {})
@@ -345,6 +348,22 @@ def build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg):
         })
     stage_breakdown = pd.DataFrame(stage_rows)
 
+    # ── activity roll-up (canonical Methodology D.6): leaves de-duplicated
+    # by (Section, Group, Category, Activity), instances counted and durations
+    # averaged — so ~16 identical building copies collapse to one row ─────
+    act_rollup = (leaf.groupby(["section", "group", "category", "activity"], as_index=False)
+                  .agg(stage=("stage", "first"),
+                       instances=("uid", "count"),
+                       avg_baseline=("base_dur", "mean"),
+                       avg_actual=("act_dur", "mean"),
+                       avg_var=("dur_var", "mean"),
+                       median_start_slip=("start_slip", "median")))
+    for c in ("avg_baseline", "avg_actual", "avg_var", "median_start_slip"):
+        act_rollup[c] = act_rollup[c].round(2)
+    top_activities = (act_rollup.sort_values("avg_var", ascending=False)
+                      .head(top_n).reset_index(drop=True))
+    top_activities.insert(0, "rank", range(1, len(top_activities) + 1))
+
     # ── activity detail (every leaf) ──────────────────────────────────────
     detail = leaf[["section", "group", "phase", "category", "sub_category",
                    "activity", "stage", "base_dur", "act_dur", "dur_var",
@@ -353,10 +372,16 @@ def build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg):
     detail = detail.rename(columns={"base_dur": "baseline", "act_dur": "actual",
                                     "dur_var": "abs_var"})
 
+    unclassified_count = int((leaf["stage"] == fallback).sum())
     report = {
         "buyout_leaf_count": len(leaf),
         "package_count": len(pkg),
         "stage_distribution": leaf["stage"].value_counts().to_dict(),
+        # QC line (work plan 5.11): % of leaves no configured keyword matched.
+        # High % = this project's naming conventions need their own
+        # buyout_analysis.stage_classification keywords, not the defaults.
+        "unclassified_count": unclassified_count,
+        "unclassified_pct": round(unclassified_count / len(leaf) * 100, 1) if len(leaf) else 0.0,
         "bucket_count": len(bucket_rows),
         "total_baseline_span": float(summary.iloc[-1]["baseline_span"]) if not summary.empty else 0,
         "total_actual_span": float(summary.iloc[-1]["actual_span"]) if not summary.empty else 0,
@@ -366,7 +391,7 @@ def build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg):
     return {
         "summary": summary, "packages": pkg, "top_packages": top_pkgs,
         "bucket_tabs": bucket_tabs, "stage_breakdown": stage_breakdown,
-        "detail": detail, "report": report,
+        "top_activities": top_activities, "detail": detail, "report": report,
     }
 
 
@@ -482,6 +507,18 @@ def write_workbook(path, cfg, res):
     ws.cell(row=base, column=1,
             value="* Total Var sums every activity occurrence across all buildings; "
                   "use Avg Var (d/occ) for the cleanest cross-stage comparison.").font = nf
+
+    # ── Top Activities (D.6 activity roll-up: building copies collapsed) ──
+    ws = wb.create_sheet("Top Activities")
+    ta = res["top_activities"]
+    hdrs = ["Rank", "Section", "Group", "Category (Package)", "Activity", "Stage",
+            "Instances", "Avg Baseline (d)", "Avg Actual (d)", "Avg Var (d)", "Median Start Slip (d)"]
+    rows = [[r["rank"], r["section"], r["group"], r["category"], r["activity"],
+             r["stage"], r["instances"], r["avg_baseline"], r["avg_actual"],
+             r["avg_var"], r["median_start_slip"]] for _, r in ta.iterrows()]
+    write_table(ws, f"Top {len(ta)} Buyout Activities by Avg Duration Variance "
+                    f"(instances de-duplicated)", hdrs, rows,
+                num_cols={8, 9, 11}, var_cols={10})
 
     # ── Top Packages ──────────────────────────────────────────────────────
     ws = wb.create_sheet("Top Packages")
@@ -602,6 +639,7 @@ def main():
     res["summary"].to_parquet(stage_dir / "buyout_summary.parquet", index=False)
     res["packages"].to_parquet(stage_dir / "buyout_packages_ranked.parquet", index=False)
     res["stage_breakdown"].to_parquet(stage_dir / "buyout_stage_breakdown.parquet", index=False)
+    res["top_activities"].to_parquet(stage_dir / "buyout_top_activities.parquet", index=False)
     res["detail"].to_parquet(stage_dir / "buyout_activity_detail.parquet", index=False)
 
     xlsx_path = stage_dir / f"Buyout_Duration_Variance_{snapshot_path.stem}.xlsx"
@@ -618,6 +656,10 @@ def main():
     # ── console summary ───────────────────────────────────────────────────
     print(f"  Buyout leaves : {report['buyout_leaf_count']}")
     print(f"  Packages      : {report['package_count']}")
+    upct = report.get("unclassified_pct", 0.0)
+    flag = "⚠ " if upct > 10 else ""
+    print(f"  Unclassified  : {report.get('unclassified_count', 0)} leaves ({upct}%) "
+          f"{flag}{'— review buyout_analysis.stage_classification keywords' if upct > 10 else ''}")
     print(f"\n  Stage distribution:")
     for st, c in report["stage_distribution"].items():
         print(f"    {st:<30} {c:>5}")

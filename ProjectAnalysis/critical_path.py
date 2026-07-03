@@ -272,25 +272,47 @@ def to_ts(v):
 # Driving-path trace  (pure, testable)
 # ---------------------------------------------------------------------------
 
-def trace_driving_path(start_uid, finish_of, preds_map, exists):
+def trace_driving_path(start_uid, finish_of, preds_map, exists,
+                       hard_constraint_of=None):
     """
     Walk backward from start_uid following the driving predecessor.
 
     finish_of(uid)  -> pd.Timestamp or None   (scheduled/forecast finish)
     preds_map[uid]  -> list of (pred_uid, is_driving)
     exists(uid)     -> bool (uid present in this snapshot's task table)
+    hard_constraint_of(uid) -> str label (e.g. "MUST_FINISH_ON") when the
+        task's dates are governed by a hard constraint or deadline, else None.
+        Optional; when omitted the trace behaves as before.
 
-    Returns the ordered chain [start_uid, ..., earliest task].
+    Returns (path, terminus_reason):
+      path            — the ordered chain [start_uid, ..., earliest task]
+      terminus_reason — "" for a normal no-predecessor terminus, or
+                        "constraint-controlled (<TYPE>)" when the walk stopped
+                        at a task whose dates a hard constraint/deadline sets.
+        Rationale (Methodology B §6 upgrade): where the scheduler used hard
+        constraints or deadlines, a task's date can be set with NO driving
+        predecessor. Previously the trace silently fell back to the
+        latest-finishing predecessor, attributing control to logic that
+        isn't actually binding. Now that terminus is recorded explicitly.
     """
     path = [start_uid]
     visited = {start_uid}
     current = start_uid
     MIN = pd.Timestamp.min
+    terminus_reason = ""
 
     while True:
         preds = preds_map.get(current, [])
         # candidate pool: those MS Project flags driving, else all
         driving = [pu for (pu, drv) in preds if drv is True]
+        if not driving and hard_constraint_of is not None:
+            # No relationship is flagged driving — before estimating via the
+            # latest-finishing predecessor, check whether this task's dates
+            # are actually governed by a hard constraint/deadline instead.
+            lbl = hard_constraint_of(current)
+            if lbl:
+                terminus_reason = f"constraint-controlled ({lbl})"
+                break
         pool = driving if driving else [pu for (pu, _) in preds]
         # restrict to tasks present this snapshot and not yet visited
         pool = [pu for pu in pool if exists(pu) and pu not in visited]
@@ -301,7 +323,7 @@ def trace_driving_path(start_uid, finish_of, preds_map, exists):
         visited.add(nxt)
         current = nxt
 
-    return path
+    return path, terminus_reason
 
 
 def find_controlling(path, is_construction, is_complete, finish_of):
@@ -373,6 +395,7 @@ def process_snapshot(snap, cfg, bucket_resolver):
     # ── task lookups ──────────────────────────────────────────────────────
     finish_map, pct_map, summary_map, name_map, res_map, parent_map, outline_map = \
         {}, {}, {}, {}, {}, {}, {}
+    hard_constraint_map = {}
     for row in tasks.itertuples(index=False):
         uid = int(row.uid)
         # forecast finish: scheduled, else actual, else baseline
@@ -387,6 +410,18 @@ def process_snapshot(snap, cfg, bucket_resolver):
         p = getattr(row, "parent_uid", None)
         parent_map[uid] = int(p) if pd.notna(p) else None
         outline_map[uid] = getattr(row, "outline_number", None)
+        # Hard-constraint / deadline detection (5.2). Anything other than
+        # AS_SOON_AS_POSSIBLE can set a task's dates independently of logic;
+        # a deadline only "governs" when the task has run out of float
+        # (deadline-driven negative slack). Columns absent on parquets from
+        # an older extraction build -> map stays empty, trace behaves as before.
+        ct = str(getattr(row, "constraint_type", "") or "")
+        if ct and ct != "AS_SOON_AS_POSSIBLE":
+            hard_constraint_map[uid] = ct
+        elif pd.notna(getattr(row, "deadline", None)):
+            slack = getattr(row, "total_slack", None)
+            if pd.notna(slack) and float(slack) <= 0:
+                hard_constraint_map[uid] = "DEADLINE_NEGATIVE_SLACK"
 
     # ── predecessor map ───────────────────────────────────────────────────
     preds_map = {}
@@ -426,6 +461,7 @@ def process_snapshot(snap, cfg, bucket_resolver):
         "concurrent_activities": "",
         "path_len": 0,
         "constr_on_path": 0,
+        "terminus_reason": "",
     }
     if milestone_uid is None:
         return result
@@ -433,13 +469,15 @@ def process_snapshot(snap, cfg, bucket_resolver):
     result["milestone_finish"] = finish_map.get(milestone_uid)
 
     # ── trace driving path ────────────────────────────────────────────────
-    path = trace_driving_path(
+    path, terminus_reason = trace_driving_path(
         milestone_uid,
         finish_of=lambda u: finish_map.get(u),
         preds_map=preds_map,
         exists=lambda u: u in finish_map,
+        hard_constraint_of=lambda u: hard_constraint_map.get(u),
     )
     result["path_len"] = len(path)
+    result["terminus_reason"] = terminus_reason
 
     def is_construction(u):
         # construction-scope work on the path, excluding the finish-milestone
@@ -509,10 +547,23 @@ def make_bucket_resolver(cfg):
 # Ledger assembly  (pure, testable)
 # ---------------------------------------------------------------------------
 
-def build_ledger(snapshot_records):
+def build_ledger(snapshot_records, attribution="later"):
     """
     From ordered per-snapshot records, build:
       windows_df, by_resource_df, waterfall_df, timeline_df, totals
+
+    attribution — which snapshot's controller each inter-snapshot day change
+    is credited to:
+      "later"   (default) — the controller at the later snapshot: whatever was
+                 on the driving path when the movement appeared. This is the
+                 canonical brief's documented "windows" convention.
+      "earlier" — the controller at the earlier snapshot: the activity that
+                 HELD the path during the window in which the slip occurred.
+                 Standard windows-analysis practice; credits slip to the
+                 incumbent rather than to whoever inherited the path.
+    The two disagree exactly at control handoffs. Both are computed by main()
+    and written to attribution_comparison.parquet so the choice is visible,
+    not silent.
     """
     recs = [r for r in snapshot_records if r["milestone_uid"] is not None]
 
@@ -520,6 +571,7 @@ def build_ledger(snapshot_records):
     windows = []
     for i in range(1, len(recs)):
         prev, curr = recs[i - 1], recs[i]
+        src = curr if attribution == "later" else prev
         pf, cf = prev["milestone_finish"], curr["milestone_finish"]
         delta = (pd.Timestamp(cf) - pd.Timestamp(pf)).days if (pf is not None and cf is not None) else 0
         windows.append({
@@ -528,12 +580,12 @@ def build_ledger(snapshot_records):
             "from_finish":          pf,
             "to_finish":            cf,
             "day_change":           delta,
-            "controlling_uid":      curr["controlling_uid"],
-            "controlling_name":     curr["controlling_name"],
-            "controlling_bucket":   curr["controlling_bucket"],
-            "controlling_resources": curr["controlling_resources"],
-            "concurrent_count":     curr.get("concurrent_count", 0),
-            "concurrent_activities": curr.get("concurrent_activities", ""),
+            "controlling_uid":      src["controlling_uid"],
+            "controlling_name":     src["controlling_name"],
+            "controlling_bucket":   src["controlling_bucket"],
+            "controlling_resources": src["controlling_resources"],
+            "concurrent_count":     src.get("concurrent_count", 0),
+            "concurrent_activities": src.get("concurrent_activities", ""),
         })
     windows_df = pd.DataFrame(windows)
 
@@ -612,6 +664,7 @@ def build_ledger(snapshot_records):
         gross_added = recovered = net = 0
 
     concurrent_weeks = int(sum(1 for r in recs if r.get("concurrent_count", 0) > 0))
+    constraint_terminated = int(sum(1 for r in recs if r.get("terminus_reason", "")))
 
     totals = {
         "gross_days_added": gross_added,
@@ -622,6 +675,10 @@ def build_ledger(snapshot_records):
         "snapshots_used": len(recs),
         "control_periods": len(wf_rows),
         "concurrent_weeks": concurrent_weeks,
+        "attribution_convention": attribution,
+        # snapshots whose driving-path trace ended at a hard-constraint/deadline
+        # governed task rather than a no-predecessor terminus (Methodology B note)
+        "constraint_terminated_traces": constraint_terminated,
     }
 
     return windows_df, by_res, waterfall_df, timeline_df, totals
@@ -779,7 +836,22 @@ def main():
               f"finish={fin.strftime('%Y-%m-%d') if fin else 'n/a':<10} "
               f"ctrl={rec['controlling_name'][:28]}")
 
-    windows_df, by_res_df, waterfall_df, timeline_df, totals = build_ledger(records)
+    attribution = (cfg.get("critical_path", {}) or {}).get("attribution_convention", "later")
+    if attribution not in ("later", "earlier"):
+        attribution = "later"
+    windows_df, by_res_df, waterfall_df, timeline_df, totals = build_ledger(records, attribution)
+
+    # Always compute the OTHER convention's by-resource table too, and persist
+    # the side-by-side. Switching conventions changes published numbers, so
+    # the delta must be reviewable before (and after) any switch — never silent.
+    other = "earlier" if attribution == "later" else "later"
+    _, by_res_other, _, _, _ = build_ledger(records, other)
+    cmp_df = (by_res_df.rename(columns={"net_days": f"net_days_{attribution}"})
+              .merge(by_res_other.rename(columns={"net_days": f"net_days_{other}"}),
+                     on="controlling_resources", how="outer")
+              .fillna(0))
+    cmp_df["delta"] = cmp_df["net_days_later"] - cmp_df["net_days_earlier"]
+    cmp_df = cmp_df.sort_values("delta", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
 
     # ── persist ───────────────────────────────────────────────────────────
     snap_df = pd.DataFrame([{k: v for k, v in r.items()} for r in records])
@@ -788,6 +860,7 @@ def main():
     windows_df.to_parquet(stage_dir / "delay_ledger_windows.parquet", index=False)
     waterfall_df.to_parquet(stage_dir / "waterfall_periods.parquet", index=False)
     by_res_df.to_parquet(stage_dir / "by_resource_net.parquet", index=False)
+    cmp_df.to_parquet(stage_dir / "attribution_comparison.parquet", index=False)
 
     xlsx_path = stage_dir / f"Delay_Ledger_{snaps[-1]['stem']}.xlsx"
     write_workbook(xlsx_path, cfg, totals, timeline_df, waterfall_df, by_res_df)
@@ -812,6 +885,17 @@ def main():
     if totals.get("concurrent_weeks"):
         print(f"  Concurrent (near-critical) weeks: {totals['concurrent_weeks']} "
               f"— finish pressured from >1 direction (see timeline)")
+    print(f"  Attribution convention: {attribution} "
+          f"(comparison vs '{other}' in attribution_comparison.parquet)")
+    if totals.get("constraint_terminated_traces"):
+        print(f"  Constraint-terminated traces: {totals['constraint_terminated_traces']} "
+              f"snapshot(s) — driving path ends at a hard-constraint/deadline-governed task")
+    if not cmp_df.empty and (cmp_df["delta"] != 0).any():
+        top = cmp_df[cmp_df["delta"] != 0].head(5)
+        print(f"  Attribution delta (top {len(top)} resources, later − earlier):")
+        for _, r in top.iterrows():
+            print(f"    {str(r['controlling_resources'])[:34]:<36} "
+                  f"later {r['net_days_later']:>+6.0f}  earlier {r['net_days_earlier']:>+6.0f}  Δ {r['delta']:>+6.0f}")
     print(f"  (Harrison reference: +157 added, −70 recovered, +87 net)")
 
     print(f"\n{'='*60}")

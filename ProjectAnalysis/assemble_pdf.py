@@ -547,6 +547,22 @@ def section_dashboard(cfg, output_root, narrative, ST, kpis):
         ("LEFTPADDING",   (0, 0), (-1, -1), 5),
     ]))
     story.append(dim_t)
+
+    # Decisions requested (5.9) — 2-4 lines, Opus-synthesized alongside
+    # questions-for-next-review under the same anti-hallucination rules
+    decisions = [d for d in (narrative.get("decisions_requested") or []) if str(d).strip()]
+    if decisions:
+        story.append(Paragraph("Decisions Requested / Recommended Actions", ST["h1"]))
+        for d in decisions[:4]:
+            story.append(Paragraph(f"• {d}", ST["body"]))
+
+    # What changed since the last brief (5.9) — conditional element for
+    # recurring briefs; absent entirely on a first brief (paths.prior_brief unset)
+    wc = str(narrative.get("what_changed_since_last_brief", "") or "").strip()
+    if wc:
+        story.append(Paragraph("What Changed Since the Last Brief", ST["h1"]))
+        story.append(Paragraph(wc, ST["body"]))
+
     story.append(PageBreak())
     return story
 
@@ -713,11 +729,55 @@ def section_part_iv(output_root, narrative, ST, cfg):
                 f"{cr['max_week_swing_days']} days. Current forecast: <b>{cr['current_forecast']}</b>.",
                 ST["body"]))
 
+    # Slip velocity (5.8) — explicitly an empirical trend read, not a forecast
+    fwd_path = output_root / "stage_g" / "forward_report.json"
+    if fwd_path.exists():
+        try:
+            vel = json.loads(fwd_path.read_text()).get("slip_velocity", {})
+        except Exception:
+            vel = {}
+        if vel.get("available"):
+            if vel.get("diverging"):
+                vtxt = (f"The forecast finish has been moving <b>{vel['slope_days_per_week']:+.1f} days "
+                        f"per week</b> over the trend window — slipping at or faster than one day per "
+                        f"day, so the current trend does not converge on a completion date. This is an "
+                        f"empirical read of recent movement, not a forecast.")
+            else:
+                vtxt = (f"At the current trend ({vel['slope_days_per_week']:+.1f} days of finish movement "
+                        f"per week over the trend window), completion projects to "
+                        f"<b>{vel['projected_completion']}</b>. This is an empirical trend read — the same "
+                        f"epistemics as the completion range above — not a forecast.")
+            story.append(Paragraph(vtxt, ST["body"]))
+
+    # S-curve + float erosion (5.8 / 5.10)
+    story += _chart(k / "s_curve.png", BODY_W * 0.85,
+                    "Planned vs actual percent complete (baseline-duration weighted).", ST)
+    story += _chart(k / "float_erosion.png", BODY_W * 0.85,
+                    "Total-float trajectory across snapshots — the time-series companion "
+                    "to the float histogram.", ST)
+
+    # Per-building driving paths (5.7)
+    bp = _load_parquet(output_root / "stage_g" / "building_driving_paths.parquet")
+    if not bp.empty:
+        story.append(Paragraph("Per-Building Driving Paths — What Each Building Is Waiting On", ST["h2"]))
+        display = bp.copy()
+        for c in ("anchor_finish", "controlling_finish"):
+            display[c] = display[c].map(lambda v: _fmt_date(v))
+        cols = [
+            ("Building",   "building",              1.15*inch, "l", False),
+            ("Controls",   "controlling_activity",  1.7*inch,  "l", False),
+            ("Resource",   "controlling_resources", 1.0*inch,  "l", False),
+            ("Ctrl Finish","controlling_finish",    0.8*inch,  "c", False),
+            ("Remaining",  "remaining_on_path",     0.7*inch,  "c", False),
+            ("Bldg Finish","anchor_finish",         0.8*inch,  "c", False),
+        ]
+        story += _var_table(display, cols, ST)
+
     story.append(PageBreak())
     return story
 
 
-def section_part_v(narrative, ST):
+def section_part_v(output_root, narrative, ST, cfg):
     """Methodology A–C — text templated from playbook; Opus can override via narrative."""
     story = _part_header(SECTION_TITLES["part_v"], ST)
 
@@ -730,11 +790,24 @@ def section_part_v(narrative, ST):
         "Mon–Fri 8-hour calendar. Absolute Variance = Actual Span − Baseline Span. Percent Variance "
         "is suppressed to n/a when the baseline span is below 0.5 working days. Net bucket variance "
         "is the arithmetic sum of task absolute variances (not an elapsed-calendar figure). "
-        "The Top-N table ranks every rolled-up task across all buckets by absolute variance."
+        "The Top-N table ranks every rolled-up task across all buckets by absolute variance. "
+        "In-progress task rule: completed tasks use actuals; in-progress tasks use the current "
+        "scheduled (forecast) finish, so their variances are forecasts that move as work completes; "
+        "not-yet-started tasks carry no actual span."
     ))
     story.append(Paragraph(meth_a, ST["body"]))
 
     # Methodology B
+    attribution = (cfg.get("critical_path", {}) or {}).get("attribution_convention", "later")
+    attr_sentence = (
+        "The <b>day change</b> between consecutive snapshots is attributed to the activity "
+        "controlling at the later snapshot — whatever was on the driving path when the movement "
+        "appeared (contemporaneous / windows attribution)."
+        if attribution == "later" else
+        "The <b>day change</b> between consecutive snapshots is attributed to the activity "
+        "controlling at the earlier snapshot — the incumbent that held the path during the window "
+        "in which the slip occurred (standard windows-analysis practice)."
+    )
     story.append(Paragraph("Methodology B — How the Critical-Path Delay Analysis Was Derived", ST["h2"]))
     meth_b = narrative.get("methodology_b", (
         "For each weekly snapshot, the analysis locates the finish milestone (Project Complete; "
@@ -742,10 +815,11 @@ def section_part_v(narrative, ST):
         "predecessor network to reconstruct the driving path — the single chain that sets the finish "
         "date. At each step, the driving predecessor is identified via the MS Project driving flag; "
         "where no flag is set, the latest-finishing predecessor is used as a best estimate. "
-        "A visited-set prevents loops. The controlling activity is the earliest-finishing construction "
-        "task on the path that is not yet complete. The <b>day change</b> between consecutive "
-        "snapshots is attributed to the activity controlling at the later snapshot "
-        "(contemporaneous / windows attribution). Day changes are summed by resource and chronologically."
+        "A visited-set prevents loops. Where a task's dates are governed by a hard constraint or "
+        "deadline rather than logic, the trace records that terminus as constraint-controlled "
+        "instead of estimating through it. The controlling activity is the earliest-finishing "
+        "construction task on the path that is not yet complete. " + attr_sentence +
+        " Day changes are summed by resource and chronologically."
     ))
     story.append(Paragraph(meth_b, ST["body"]))
 
@@ -757,9 +831,45 @@ def section_part_v(narrative, ST):
         "construction tasks banded by MS Project total slack. Completion range: the span of "
         "driving-path forecast finish over the last N weekly snapshots — an empirical uncertainty "
         "band, not a modeled confidence interval. Look-ahead: not-yet-complete construction tasks "
-        "on the current driving path."
+        "on the current driving path. Slip velocity: a trailing regression of forecast-finish "
+        "movement over the same window, reported as an empirical trend, not a forecast."
     ))
     story.append(Paragraph(meth_c, ST["body"]))
+
+    # Schedule-health panel (5.6, DCMA-style) — from the last Stage M QC run
+    qc_path = output_root / "stage_m" / "qc_report.json"
+    if qc_path.exists():
+        try:
+            sh = json.loads(qc_path.read_text(encoding="utf-8")) \
+                .get("checks", {}).get("schedule_health", {})
+        except Exception:
+            sh = {}
+        if sh and "error" not in sh:
+            story.append(Paragraph("Schedule Health Panel (latest snapshot)", ST["h2"]))
+            def _v(x):
+                return "n/a" if x is None else str(x)
+            rows = pd.DataFrame([
+                {"metric": "Open ends — tasks with no predecessor", "value": _v(sh.get("open_ends_no_predecessor"))},
+                {"metric": "Open ends — tasks with no successor",   "value": _v(sh.get("open_ends_no_successor"))},
+                {"metric": "Hard constraints (non-ASAP)",           "value": _v(sh.get("hard_constraint_count"))},
+                {"metric": "Negative-float tasks (incomplete)",     "value": _v(sh.get("negative_float_count"))},
+                {"metric": "Relationship leads (negative lag)",     "value": _v(sh.get("leads_count"))},
+                {"metric": "Relationship lags (positive lag)",      "value": _v(sh.get("lags_count"))},
+                {"metric": "Out-of-sequence progress",              "value": _v(sh.get("out_of_sequence_progress"))},
+                {"metric": "Actuals beyond status date",            "value": _v(sh.get("actuals_beyond_status_date"))},
+                {"metric": "High-duration remaining (>20 wd left)", "value": _v(sh.get("high_duration_remaining"))},
+            ])
+            cols = [
+                ("Metric", "metric", 3.6*inch, "l", False),
+                ("Count",  "value",  1.0*inch, "c", False),
+            ]
+            story += _var_table(rows, cols, ST)
+            story.append(Paragraph(
+                "Computed from the latest snapshot's task and relationship data. These are standard "
+                "schedule-quality indicators (DCMA-style): they qualify how much confidence the "
+                "logic-driven analyses above deserve, not the project's performance itself.",
+                ST["caption"]))
+
     story.append(PageBreak())
     return story
 
@@ -796,6 +906,15 @@ def section_part_vi(output_root, narrative, ST, cfg):
             ("Total Var (d)",  "total_var",   0.8*inch, "c", True),
         ]
         story += _var_table(sb, cols, ST)
+
+    # Two-measurement scatter + PO-cycle trend (5.10) — skip cleanly when the
+    # charts weren't generated (no buyout scope / too little data)
+    k = output_root / "stage_k"
+    story += _chart(k / "buyout_scatter.png", BODY_W * 0.85,
+                    "Each point is one package: start-date slip (x) vs duration variance (y). "
+                    "The quadrants separate delay that was generated from delay that was inherited.", ST)
+    story += _chart(k / "po_cycle_trend.png", BODY_W * 0.85,
+                    "Purchase-order cycle duration over time, with rolling median.", ST)
 
     # Top packages
     tp = _load_parquet(output_root / "stage_h" / "buyout_packages_ranked.parquet")
@@ -954,7 +1073,7 @@ def main():
         s += mark("part_ii")    + section_part_ii(output_root, narrative, ST)
         s += mark("part_iii")   + section_part_iii(output_root, narrative, ST, cfg)
         s += mark("part_iv")    + section_part_iv(output_root, narrative, ST, cfg)
-        s += mark("part_v")     + section_part_v(narrative, ST)
+        s += mark("part_v")     + section_part_v(output_root, narrative, ST, cfg)
         if include_part_vi:
             s += mark("part_vi") + section_part_vi(output_root, narrative, ST, cfg)
         s += mark("appendix_a") + section_appendix_a(output_root, narrative, ST)

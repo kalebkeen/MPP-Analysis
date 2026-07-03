@@ -288,9 +288,15 @@ def _data_driving_resource(cfg, paths, project):
     df["res"] = df["controlling_resources"].fillna("(unassigned)").replace("", "(unassigned)")
     df = df.sort_values("Snapshot Date")
 
-    # resources controlling more than one week get a color; singletons -> "other"
+    # resources controlling more than one week get a color; singletons -> "other".
+    # Legend cap (5.10): above legend_max_series distinct resources, only the
+    # top N by weeks-in-control keep their own series — the rest group into
+    # "other", so a 30-sub project can't explode the legend off the chart.
     counts = df["res"].value_counts()
     main = counts[counts > 1].index.tolist()
+    max_series = int(cfg.get("charting", {}).get("legend_max_series", 10) or 10)
+    if len(main) > max_series:
+        main = counts.index.tolist()[:max_series]
     df["res_group"] = df["res"].where(df["res"].isin(main), "other (1 wk each)")
 
     pivot = df.pivot_table(index="Snapshot Date", columns="res_group",
@@ -513,6 +519,203 @@ def _render_float_histogram(df, title, cfg, project, out_dir):
 
 
 # ---------------------------------------------------------------------------
+# 8. S-curve — planned vs actual percent complete  (Part IV, work plan 5.8/5.10)
+# ---------------------------------------------------------------------------
+
+def _data_s_curve(cfg, paths, project):
+    src = paths["stage_g"] / "progress_curve.parquet"
+    if not src.exists():
+        print("    [skip] s_curve — Stage G progress_curve missing")
+        return None, None
+    df = pd.read_parquet(src)
+    if df.empty:
+        print("    [skip] s_curve — no progress data")
+        return None, None
+    out = pd.DataFrame({
+        "Snapshot Date": _to_dt(df["date"]),
+        "Planned % Complete": df["planned_pct"].round(1),
+        "Actual % Complete": df["actual_pct"].round(1),
+    }).sort_values("Snapshot Date").reset_index(drop=True)
+    title = f"{project} — S-Curve: Planned vs Actual Percent Complete"
+    return out, title
+
+
+def _render_s_curve(df, title, cfg, project, out_dir):
+    fig, ax = plt.subplots(figsize=(10, 5.2))
+    ax.plot(df["Snapshot Date"], df["Planned % Complete"], color="#888888",
+            lw=1.8, ls="--", label="Planned (baseline windows)")
+    ax.plot(df["Snapshot Date"], df["Actual % Complete"], color=NAVY,
+            lw=2, marker="o", ms=3.5, label="Actual (each snapshot)")
+    ax.set_title(title)
+    ax.set_ylabel("Percent complete (baseline-duration weighted)")
+    ax.set_xlabel("Snapshot date")
+    ax.set_ylim(0, 105)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.legend(loc="lower right", fontsize=8, framealpha=0.9)
+    fig.autofmt_xdate(rotation=0, ha="center")
+    _save(fig, out_dir / "s_curve.png")
+
+
+# ---------------------------------------------------------------------------
+# 9. Float-erosion trend  (Part IV, work plan 5.10)
+# ---------------------------------------------------------------------------
+
+def _data_float_erosion(cfg, paths, project):
+    try:
+        from critical_path import discover_snapshots, is_buyout_outline
+    except ImportError:
+        print("    [skip] float_erosion — needs critical_path.py")
+        return None, None
+    try:
+        snaps = discover_snapshots(cfg, MANIFEST_PATH)
+    except Exception as e:
+        print(f"    [skip] float_erosion — {e}")
+        return None, None
+    buyout_prefixes = cfg["schedule"]["buyout_outline_prefixes"]
+    thresh = cfg["schedule"].get("percent_complete_threshold_complete", 100)
+    rows = []
+    for snap in snaps:
+        try:
+            df = pd.read_parquet(snap["tasks_path"],
+                                 columns=["outline_number", "is_summary",
+                                          "pct_complete", "total_slack"])
+        except Exception:
+            continue
+        m = (~df["is_summary"]) & (df["pct_complete"].fillna(0) < thresh) & \
+            df["total_slack"].notna() & \
+            (~df["outline_number"].astype(str).map(
+                lambda s: is_buyout_outline(s, buyout_prefixes)))
+        sub = df[m]
+        if sub.empty:
+            continue
+        rows.append({"Snapshot Date": pd.Timestamp(snap["date"]),
+                     "Median Total Float (wd)": float(sub["total_slack"].median()),
+                     "25th Percentile Float (wd)": float(sub["total_slack"].quantile(0.25))})
+    if not rows:
+        print("    [skip] float_erosion — no float data")
+        return None, None
+    out = pd.DataFrame(rows).sort_values("Snapshot Date").reset_index(drop=True)
+    title = f"{project} — Float Erosion: Remaining Cushion Over Time"
+    return out, title
+
+
+def _render_float_erosion(df, title, cfg, project, out_dir):
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df["Snapshot Date"], df["Median Total Float (wd)"], color=NAVY,
+            lw=2, marker="o", ms=3.5, label="Median total float (incomplete tasks)")
+    ax.plot(df["Snapshot Date"], df["25th Percentile Float (wd)"], color="#E67E22",
+            lw=1.6, ls="-.", label="25th percentile")
+    ax.axhline(0, color=RED, ls="--", lw=1.2, label="Zero float (critical)")
+    ax.set_title(title)
+    ax.set_ylabel("Total float (working days)")
+    ax.set_xlabel("Snapshot date")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.legend(loc="best", fontsize=8, framealpha=0.9)
+    fig.autofmt_xdate(rotation=0, ha="center")
+    _save(fig, out_dir / "float_erosion.png")
+
+
+# ---------------------------------------------------------------------------
+# 10. Two-measurement scatter — start slip vs duration variance  (Part VI, 5.10)
+# ---------------------------------------------------------------------------
+
+def _data_buyout_scatter(cfg, paths, project):
+    det_p = paths["stage_h"] / "buyout_activity_detail.parquet"
+    pkg_p = paths["stage_h"] / "buyout_packages_ranked.parquet"
+    if not det_p.exists() or not pkg_p.exists():
+        print("    [skip] buyout_scatter — Stage H output missing")
+        return None, None
+    det = pd.read_parquet(det_p)
+    pkg = pd.read_parquet(pkg_p)
+    if det.empty or pkg.empty:
+        print("    [skip] buyout_scatter — no buyout scope")
+        return None, None
+    slip = (det.dropna(subset=["start_slip"])
+            .groupby("category")["start_slip"].median().rename("Start Slip (wd)"))
+    out = (pkg[["category", "abs_var"]]
+           .rename(columns={"category": "Package", "abs_var": "Duration Variance (wd)"})
+           .merge(slip, left_on="Package", right_index=True, how="inner")
+           [["Package", "Start Slip (wd)", "Duration Variance (wd)"]]
+           .reset_index(drop=True))
+    if out.empty:
+        print("    [skip] buyout_scatter — no packages with start-slip data")
+        return None, None
+    title = f"{project} — Buyout Packages: Start Slip vs Duration Variance"
+    return out, title
+
+
+def _render_buyout_scatter(df, title, cfg, project, out_dir):
+    fig, ax = plt.subplots(figsize=(9.5, 6))
+    ax.scatter(df["Start Slip (wd)"], df["Duration Variance (wd)"], s=42,
+               color=NAVY, edgecolor="white", lw=0.5, zorder=3)
+    ax.axhline(0, color="#999999", lw=1)
+    ax.axvline(0, color="#999999", lw=1)
+    # quadrant annotations — the central buyout insight at a glance
+    xmax = max(abs(df["Start Slip (wd)"].max()), abs(df["Start Slip (wd)"].min()), 1)
+    ymax = max(abs(df["Duration Variance (wd)"].max()), abs(df["Duration Variance (wd)"].min()), 1)
+    q = dict(fontsize=8, color=GRAYTXT, style="italic", ha="center")
+    ax.text(xmax * 0.55,  ymax * 0.92, "started late, ran long", **q)
+    ax.text(-xmax * 0.55, ymax * 0.92, "started fine, ran long", **q)
+    ax.text(xmax * 0.55,  -ymax * 0.92, "started late, ran fine", **q)
+    ax.text(-xmax * 0.55, -ymax * 0.92, "started fine, ran fine", **q)
+    # label the biggest outliers only (readability over completeness)
+    mag = (df["Start Slip (wd)"].abs() / xmax + df["Duration Variance (wd)"].abs() / ymax)
+    for _, r in df.loc[mag.nlargest(6).index].iterrows():
+        ax.annotate(str(r["Package"])[:24], xy=(r["Start Slip (wd)"], r["Duration Variance (wd)"]),
+                    xytext=(4, 4), textcoords="offset points", fontsize=7, color=GRAYTXT)
+    ax.set_title(title)
+    ax.set_xlabel("Start-date slip (working days, median across package activities)")
+    ax.set_ylabel("Duration variance (working days, summary-span)")
+    _save(fig, out_dir / "buyout_scatter.png")
+
+
+# ---------------------------------------------------------------------------
+# 11. PO-cycle trend  (Part VI, 5.10 — the headline finding gets its own chart)
+# ---------------------------------------------------------------------------
+
+def _data_po_cycle(cfg, paths, project):
+    det_p = paths["stage_h"] / "buyout_activity_detail.parquet"
+    if not det_p.exists():
+        print("    [skip] po_cycle — Stage H output missing")
+        return None, None
+    det = pd.read_parquet(det_p)
+    if det.empty:
+        print("    [skip] po_cycle — no buyout scope")
+        return None, None
+    po = det[det["stage"].astype(str).str.contains("order", case=False)
+             & det["actual_finish"].notna()].copy()
+    if len(po) < 5:
+        print("    [skip] po_cycle — too few purchase-order activities")
+        return None, None
+    po["Finish Date"] = _to_dt(po["actual_finish"])
+    po = po.sort_values("Finish Date")
+    out = pd.DataFrame({
+        "Finish Date": po["Finish Date"],
+        "PO Duration (wd)": po["actual"].astype(float).round(1),
+    }).reset_index(drop=True)
+    out["Rolling Median (wd)"] = (out["PO Duration (wd)"]
+                                  .rolling(window=max(5, len(out) // 10),
+                                           min_periods=3, center=True).median())
+    title = f"{project} — Purchase-Order Cycle Duration Over Time"
+    return out, title
+
+
+def _render_po_cycle(df, title, cfg, project, out_dir):
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.scatter(df["Finish Date"], df["PO Duration (wd)"], s=14, color=NAVY,
+               alpha=0.45, edgecolor="none", label="PO-cycle activity", zorder=2)
+    ax.plot(df["Finish Date"], df["Rolling Median (wd)"], color=RED, lw=2,
+            label="Rolling median", zorder=3)
+    ax.set_title(title)
+    ax.set_ylabel("Actual duration (working days)")
+    ax.set_xlabel("Activity finish date")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.legend(loc="best", fontsize=8, framealpha=0.9)
+    fig.autofmt_xdate(rotation=0, ha="center")
+    _save(fig, out_dir / "po_cycle_trend.png")
+
+
+# ---------------------------------------------------------------------------
 # Editable chart data workbook (stage_k/chart_data_workbook.xlsx)
 # ---------------------------------------------------------------------------
 
@@ -527,6 +730,13 @@ CHART_SPECS = [
     ("resource_net_bar",    _data_resource_net_bar,     _render_resource_net_bar,   "bar_pointcolor_h"),
     ("building_lollipop",   _data_building_lollipop,    _render_building_lollipop,  "bar_floating_h"),
     ("float_histogram",     _data_float_histogram,      _render_float_histogram,    "bar_pointcolor_v"),
+    # Work plan 5.10 additions — same dual-output pattern, same house styling.
+    # The two Part VI charts skip themselves cleanly when buyout is out of scope
+    # (their Stage H source parquets are empty-but-valid in that state).
+    ("s_curve",             _data_s_curve,              _render_s_curve,            "line"),
+    ("float_erosion",       _data_float_erosion,        _render_float_erosion,      "line"),
+    ("buyout_scatter",      _data_buyout_scatter,       _render_buyout_scatter,     "scatter"),
+    ("po_cycle_trend",      _data_po_cycle,             _render_po_cycle,           "scatter"),
 ]
 
 
@@ -710,6 +920,7 @@ def main():
         "stage_e": output_root / "stage_e",
         "stage_f": output_root / "stage_f",
         "stage_g": output_root / "stage_g",
+        "stage_h": output_root / "stage_h",
         "stage_c": output_root / "stage_c",
     }
 

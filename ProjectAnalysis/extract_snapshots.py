@@ -276,6 +276,17 @@ def extract_file(xml_path: Path, snapshot_label: str,
         sched_start   = to_pydate(task.getStart())
         sched_finish  = to_pydate(task.getFinish())
 
+        # ── Constraints / deadline (Stage F constraint-terminated path
+        # detection + Stage M schedule-health panel) ─────────────────────
+        # constraint_type is MS Project's ConstraintType enum name (e.g.
+        # AS_SOON_AS_POSSIBLE, MUST_FINISH_ON, START_NO_EARLIER_THAN);
+        # empty string when unset. ASAP is recorded too — the consumers
+        # decide which types count as "hard".
+        ct = task.getConstraintType()
+        constraint_type = str(ct.name()) if ct is not None else ""
+        constraint_date = to_pydate(task.getConstraintDate())
+        deadline        = to_pydate(task.getDeadline())
+
         # ── Resource assignments (names only) ───────────────────────────
         resource_names = []
         for asgn in task.getResourceAssignments():
@@ -311,6 +322,9 @@ def extract_file(xml_path: Path, snapshot_label: str,
             "total_slack":        total_slack,
             "sched_start":        sched_start,
             "sched_finish":       sched_finish,
+            "constraint_type":    constraint_type,
+            "constraint_date":    constraint_date,
+            "deadline":           deadline,
             "resources":          resources_str,
         })
 
@@ -522,7 +536,12 @@ def main():
         # so re-extract it instead of silently serving stale data downstream.
         if snap_out.exists() and not args.force:
             existing = pd.read_parquet(snap_out)
-            required_cols = {"construction_baseline_duration", "buyout_baseline_duration"}
+            # required_cols must name the NEWEST schema additions, not just any
+            # old marker — every time extraction gains a column, add it here,
+            # or existing caches will be served stale without it (bit us when
+            # the constraint columns were added: all 98 files "cached, skipping").
+            required_cols = {"construction_baseline_duration", "buyout_baseline_duration",
+                             "constraint_type", "constraint_date", "deadline"}
             if required_cols.issubset(existing.columns):
                 print("(cached, skipping)")
                 processed_snapshots.append(snapshot_label)

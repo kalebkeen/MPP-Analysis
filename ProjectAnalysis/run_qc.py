@@ -355,6 +355,168 @@ def check_zero_baseline(output_root, cfg):
 
 
 # ---------------------------------------------------------------------------
+# Check 6 — Baseline integrity (rebaseline churn)  [work plan 5.5]
+# ---------------------------------------------------------------------------
+
+def check_baseline_integrity(output_root, cfg):
+    """
+    For each UID, compare the saved Baseline start/finish/duration across all
+    snapshots and report any UID whose baseline values changed mid-project.
+    Rebaselining silently invalidates Stage E variances (baseline vs actual)
+    and Stage H start-slips — this check is the guard that makes it loud.
+    """
+    snap_dir = output_root / "stage_c" / "snapshots"
+    parquets = sorted(snap_dir.glob("*.parquet")) if snap_dir.exists() else []
+    if len(parquets) < 2:
+        return {"error": "Fewer than 2 Stage C snapshots — nothing to compare."}
+
+    cols = ["uid", "name", "outline_number",
+            "baseline_start", "baseline_finish", "baseline_duration"]
+    frames = []
+    for p in parquets:
+        try:
+            df = pd.read_parquet(p, columns=cols)
+        except Exception:
+            continue
+        frames.append(df)
+    combined = pd.concat(frames, ignore_index=True)
+    # Only UIDs that ever carried a baseline; a task gaining its FIRST baseline
+    # is normal planning, not churn — churn is a baseline that CHANGED.
+    with_bl = combined[combined["baseline_start"].notna()
+                       | combined["baseline_finish"].notna()
+                       | combined["baseline_duration"].notna()]
+    if with_bl.empty:
+        return {"error": "No baseline data in any snapshot."}
+
+    g = with_bl.groupby("uid").agg(
+        n_start=("baseline_start", "nunique"),
+        n_finish=("baseline_finish", "nunique"),
+        n_dur=("baseline_duration", "nunique"),
+        name=("name", "last"),
+        outline=("outline_number", "last"),
+    )
+    changed = g[(g["n_start"] > 1) | (g["n_finish"] > 1) | (g["n_dur"] > 1)]
+
+    def branch(o):
+        s = str(o or "")
+        return "Buyout" if (s == "1" or s.startswith("1.")) else (
+            "Construction" if (s == "2" or s.startswith("2.")) else "Other")
+
+    by_branch = changed["outline"].map(branch).value_counts().to_dict() \
+        if not changed.empty else {}
+
+    total_tracked = int(g.shape[0])
+    return {
+        "uids_with_baseline":     total_tracked,
+        "rebaselined_uid_count":  int(len(changed)),
+        "rebaselined_pct":        _pct(len(changed), total_tracked),
+        "by_branch":              by_branch,
+        "examples":               list(changed["name"].head(10)),
+        "warn":                   len(changed) > 0,
+        "note": ("Baseline values for these UIDs changed between snapshots. "
+                 "Variance and start-slip figures compare against the LATEST "
+                 "snapshot's saved baseline; earlier trend points may reflect "
+                 "a different baseline of record."),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Check 7 — Schedule health panel (DCMA-style)  [work plan 5.6]
+# ---------------------------------------------------------------------------
+
+def check_schedule_health(output_root, cfg):
+    """
+    Compact scheduler-facing panel computed from already-extracted data
+    (latest snapshot): open ends, hard constraints, negative float,
+    leads/lags, out-of-sequence progress, actuals beyond status date,
+    high-duration remaining tasks. Cheap to compute; high credibility value
+    with schedulers and owners' reps. Rendered as a small table in Part V.
+    """
+    snap_dir = output_root / "stage_c" / "snapshots"
+    parquets = sorted(snap_dir.glob("*.parquet")) if snap_dir.exists() else []
+    if not parquets:
+        return {"error": "No Stage C snapshots found."}
+    try:
+        from critical_path import select_single_snapshot
+        latest = select_single_snapshot(cfg, None, parquets)
+    except Exception:
+        latest = parquets[-1]
+
+    tasks = pd.read_parquet(latest)
+    pred_path = latest.parent.parent / "predecessors" / latest.name
+    try:
+        preds = pd.read_parquet(pred_path)
+    except Exception:
+        preds = pd.DataFrame(columns=["task_uid", "pred_task_uid", "rel_type", "lag_wd"])
+
+    complete_thresh = cfg["schedule"].get("percent_complete_threshold_complete", 100)
+    leaves = tasks[~tasks["is_summary"]]
+    incomplete = leaves[leaves["pct_complete"].fillna(0) < complete_thresh]
+
+    has_pred = set(preds["task_uid"].dropna().astype(int)) if not preds.empty else set()
+    has_succ = set(preds["pred_task_uid"].dropna().astype(int)) if not preds.empty else set()
+    leaf_uids = set(leaves["uid"].astype(int))
+    no_pred = len(leaf_uids - has_pred)
+    no_succ = len(leaf_uids - has_succ)
+
+    if "constraint_type" in tasks.columns:
+        hard = leaves[~leaves["constraint_type"].fillna("").isin(["", "AS_SOON_AS_POSSIBLE"])]
+        hard_count = int(len(hard))
+    else:
+        hard_count = None  # parquet from an older extraction build
+
+    neg_float = int((incomplete["total_slack"].fillna(0) < 0).sum()) \
+        if "total_slack" in incomplete.columns else None
+
+    leads = int((preds["lag_wd"].fillna(0) < 0).sum()) if "lag_wd" in preds.columns else None
+    lags  = int((preds["lag_wd"].fillna(0) > 0).sum()) if "lag_wd" in preds.columns else None
+
+    # Out-of-sequence progress: task has actuals while an FS predecessor is
+    # still incomplete — actuals ran ahead of the logic.
+    oos = None
+    if not preds.empty:
+        pct_map = dict(zip(tasks["uid"].astype(int), tasks["pct_complete"].fillna(0)))
+        started = set(leaves.loc[leaves["actual_start"].notna(), "uid"].astype(int))
+        fs = preds[preds["rel_type"].astype(str).str.upper().str.startswith("FS")] \
+            if "rel_type" in preds.columns else preds
+        oos = int(sum(1 for tu, pu in zip(fs["task_uid"], fs["pred_task_uid"])
+                      if pd.notna(pu) and int(tu) in started
+                      and pct_map.get(int(pu), 0) < complete_thresh))
+
+    # Actuals beyond the status date
+    status = cfg["project"].get("analysis_status_date", "")
+    beyond = None
+    if status:
+        sd = pd.Timestamp(status)
+        af = pd.to_datetime(leaves["actual_finish"], errors="coerce")
+        as_ = pd.to_datetime(leaves["actual_start"], errors="coerce")
+        # only completed work counts as an "actual" finish
+        done = leaves["pct_complete"].fillna(0) >= complete_thresh
+        beyond = int(((af > sd) & done).sum() + ((as_ > sd) & (leaves["actual_start"].notna())).sum())
+
+    # High-duration remaining: incomplete tasks with > 20 wd of remaining work
+    high_dur = None
+    if "duration" in incomplete.columns:
+        rem = incomplete["duration"].fillna(0) * (1 - incomplete["pct_complete"].fillna(0) / 100.0)
+        high_dur = int((rem > 20).sum())
+
+    return {
+        "snapshot":                    latest.stem,
+        "leaf_tasks":                  int(len(leaves)),
+        "incomplete_tasks":            int(len(incomplete)),
+        "open_ends_no_predecessor":    no_pred,
+        "open_ends_no_successor":      no_succ,
+        "hard_constraint_count":       hard_count,
+        "negative_float_count":        neg_float,
+        "leads_count":                 leads,
+        "lags_count":                  lags,
+        "out_of_sequence_progress":    oos,
+        "actuals_beyond_status_date":  beyond,
+        "high_duration_remaining":     high_dur,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Opus synthesis
 # ---------------------------------------------------------------------------
 #
@@ -464,6 +626,35 @@ def _load_context_for_synthesis(output_root, cfg, qc_results):
         except Exception:
             buyout_scope = False
 
+    # Optional prior brief (paths.prior_brief -> a previous run's
+    # stage_j/narrative.json) enables the what-changed-since-last-brief
+    # dashboard element for recurring briefs. Absent/blank = first brief,
+    # the element is skipped entirely.
+    prior = {}
+    prior_path = str(cfg.get("paths", {}).get("prior_brief", "") or "").strip()
+    if prior_path and Path(prior_path).exists():
+        try:
+            pn = json.loads(Path(prior_path).read_text(encoding="utf-8"))
+            prior = {
+                "bottom_line":        pn.get("bottom_line", ""),
+                "executive_overview": pn.get("executive_overview", ""),
+                "risks":              [pn.get(k, "") for k in
+                                       ("risk_1", "risk_2", "risk_3", "risk_4")],
+            }
+        except Exception:
+            prior = {}
+
+    # Slip velocity (Stage G, 5.8) — one line on the dashboard/Part IV,
+    # framed as empirical trend, never as a forecast.
+    fwd_rep = {}
+    fwd_p = output_root / "stage_g" / "forward_report.json"
+    if fwd_p.exists():
+        try:
+            fwd_rep = json.loads(fwd_p.read_text(encoding="utf-8"))
+        except Exception:
+            fwd_rep = {}
+    slip_velocity = fwd_rep.get("slip_velocity", {})
+
     return {
         "project": project,
         "status_date": status,
@@ -482,6 +673,8 @@ def _load_context_for_synthesis(output_root, cfg, qc_results):
         "buyout_summary": buyout_summary,
         "buyout_stage_breakdown": buyout_stage_breakdown,
         "top_packages": top_packages,
+        "prior_brief": prior,
+        "slip_velocity": slip_velocity,
         "qc_findings": {k: {ek: ev for ek, ev in v.items()
                              if ek not in ("bucket_detail",)}
                         for k, v in qc_results.items()
@@ -539,6 +732,12 @@ BUYOUT — STAGE BREAKDOWN (empty if no buyout scope configured):
 BUYOUT — TOP PACKAGES BY VARIANCE (empty if no buyout scope configured):
 {top_packages}
 
+SLIP VELOCITY (empirical trend over the completion-range window — describe it as a trend read, NEVER as a forecast):
+{slip_velocity}
+
+PRIOR BRIEF (empty braces = this is the first brief; skip the what-changed field entirely by returning ""):
+{prior_brief}
+
 QC FINDINGS:
 {qc_findings}
 
@@ -572,6 +771,8 @@ Respond ONLY in valid JSON with this exact structure - no preamble, no markdown 
   "part_vi_stage_breakdown_note": "Short note framing the buyout stage-breakdown table - same rule: say so if there's no buyout data.",
   "part_vi_methodology_d_note": "Short closing note for the buyout section - same rule.",
   "appendix_a_note": "One short sentence framing the full task-level appendix table ({appendix_row_count} rows).",
+  "decisions_requested": ["Action/decision 1", "Action/decision 2", "Action/decision 3"],
+  "what_changed_since_last_brief": "2-4 sentences comparing this brief's findings to the PRIOR BRIEF data above - what improved, what worsened, what is new. Return an empty string \\"\\" if PRIOR BRIEF is empty.",
   "questions_for_next_review": ["Question 1", "Question 2", "Question 3", "Question 4", "Question 5"],
   "watch_list": [
     {{"scope": "...", "reason": "..."}},
@@ -588,6 +789,8 @@ Respond ONLY in valid JSON with this exact structure - no preamble, no markdown 
 Rules:
 - Every "intro"/"analysis"/"note" field: 2-5 sentences, plain prose (no markdown headers), ready to paste directly into the PDF body.
 - risk_1..4 and status_by_dimension_core: only the 4 dimensions listed - Cost/budget and Open items are handled separately, not part of your response.
+- decisions_requested: 2-4 items, each a concrete decision or action for the executive reader (approve/resequence/escalate/fund X), grounded in the data above with the specific scope named - same anti-hallucination rules as everything else. These render on the Page-1 dashboard.
+- what_changed_since_last_brief: only when PRIOR BRIEF data is present; ground every claim in the differences between the prior text and the current data. Empty string when there is no prior brief.
 - questions_for_next_review: 4-6 items, each a specific, answerable question grounded in the actual data above - name specific resources, tasks, or buildings.
 - watch_list: 3-5 items, each a resource or scope with a specific data-driven reason it carries the most leverage to protect or lose the finish.
 - data_quality_notes: 3-5 items, specific factual caveats (e.g. UID persistence rate, zero-baseline count, rename count) formatted as complete sentences.
@@ -631,6 +834,8 @@ def run_synthesis(context, output_root, stage_j_dir):
         qc_findings=json.dumps(context["qc_findings"], indent=2, default=str),
         neg_buildings=context["negative_variance_buildings"],
         zero_baseline_count=context["zero_baseline_count"],
+        slip_velocity=json.dumps(context.get("slip_velocity", {}), indent=2, default=str),
+        prior_brief=json.dumps(context.get("prior_brief", {}), indent=2, default=str),
     )
 
     try:
@@ -725,6 +930,11 @@ def run_synthesis(context, output_root, stage_j_dir):
     narrative["watch_list"]                = synthesis.get("watch_list", [])
     narrative["data_quality_notes"]        = synthesis.get("data_quality_notes", [])
     narrative["scope_gaps"]                = synthesis.get("scope_gaps", [])
+    # 5.9 dashboard elements. NOTE: every new key the prompt requests must
+    # also be merged here, or it silently exists only in synthesis.json —
+    # exactly how decisions_requested went missing on its first run.
+    narrative["decisions_requested"]       = synthesis.get("decisions_requested", [])
+    narrative["what_changed_since_last_brief"] = synthesis.get("what_changed_since_last_brief", "")
 
     narr_path.write_text(json.dumps(narrative, indent=2, ensure_ascii=False),
                          encoding="utf-8")
@@ -766,7 +976,7 @@ def main():
     qc_results = {}
 
     # ── Check 1: UID persistence ──────────────────────────────────────────
-    print("  [1/5] UID persistence...")
+    print("  [1/7] UID persistence...")
     uid = check_uid_persistence(output_root, cfg)
     qc_results["uid_persistence"] = uid
     status = f"{uid.get('uid_persistence_pct')}%"
@@ -777,7 +987,7 @@ def main():
         print(f"       Renames seen: {uid['rename_count']}")
 
     # ── Check 2: Rename detection ─────────────────────────────────────────
-    print("  [2/5] Rename detection...")
+    print("  [2/7] Rename detection...")
     rename_result, renames_df = check_renames(output_root)
     qc_results["renames"] = rename_result
     if "error" not in rename_result:
@@ -790,7 +1000,7 @@ def main():
         print(f"       –  {rename_result['error']}")
 
     # ── Check 3: Bucket cross-check ───────────────────────────────────────
-    print("  [3/5] Name-vs-UID bucket cross-check...")
+    print("  [3/7] Name-vs-UID bucket cross-check...")
     xcheck = check_bucket_crosscheck(output_root, cfg)
     if isinstance(xcheck, tuple):
         xcheck_result, xcheck_df = xcheck
@@ -809,7 +1019,7 @@ def main():
         print(f"       –  {xcheck.get('error','unknown error')}")
 
     # ── Check 4: Negative-variance buildings ──────────────────────────────
-    print("  [4/5] Negative-variance buildings...")
+    print("  [4/7] Negative-variance buildings...")
     neg = check_negative_variance(output_root, cfg)
     qc_results["negative_variance"] = neg
     if "error" not in neg:
@@ -821,7 +1031,7 @@ def main():
         print(f"       –  {neg['error']}")
 
     # ── Check 5: Zero-baseline lines ──────────────────────────────────────
-    print("  [5/5] Zero-baseline lines...")
+    print("  [5/7] Zero-baseline lines...")
     zb = check_zero_baseline(output_root, cfg)
     qc_results["zero_baseline"] = zb
     if "error" not in zb:
@@ -832,6 +1042,33 @@ def main():
             print(f"       Examples: {zb['examples'][:4]}")
     else:
         print(f"       –  {zb['error']}")
+
+    # ── Check 6: Baseline integrity (rebaseline churn) ────────────────────
+    print("  [6/7] Baseline integrity across snapshots...")
+    bi = check_baseline_integrity(output_root, cfg)
+    qc_results["baseline_integrity"] = bi
+    if "error" not in bi:
+        n = bi["rebaselined_uid_count"]
+        print(f"       {'⚠' if n else '✓'}  {n} of {bi['uids_with_baseline']} UIDs "
+              f"({bi['rebaselined_pct']}%) had baseline values change mid-project"
+              + (f"  by branch: {bi['by_branch']}" if bi["by_branch"] else ""))
+        if bi["examples"]:
+            print(f"       Examples: {bi['examples'][:4]}")
+    else:
+        print(f"       –  {bi['error']}")
+
+    # ── Check 7: Schedule health (DCMA-style panel) ───────────────────────
+    print("  [7/7] Schedule health panel...")
+    sh = check_schedule_health(output_root, cfg)
+    qc_results["schedule_health"] = sh
+    if "error" not in sh:
+        parts = [f"open ends {sh['open_ends_no_predecessor']}p/{sh['open_ends_no_successor']}s"]
+        if sh["hard_constraint_count"] is not None: parts.append(f"hard constraints {sh['hard_constraint_count']}")
+        if sh["negative_float_count"] is not None:  parts.append(f"neg float {sh['negative_float_count']}")
+        if sh["out_of_sequence_progress"] is not None: parts.append(f"out-of-seq {sh['out_of_sequence_progress']}")
+        print(f"       ✓  {'; '.join(parts)}")
+    else:
+        print(f"       –  {sh['error']}")
 
     # ── Write QC report ───────────────────────────────────────────────────
     qc_report = {
@@ -871,6 +1108,9 @@ def main():
             ) if synthesis.get(k))
             print(f"  ✓ Synthesis complete")
             print(f"    Narrative sections written: {narrative_keys_filled}/14")
+            print(f"    Decisions requested:  {len(synthesis.get('decisions_requested',[]))}")
+            wc = str(synthesis.get('what_changed_since_last_brief', '') or '').strip()
+            print(f"    What-changed element: {'present' if wc else 'skipped (first brief)'}")
             print(f"    Questions for review: {len(synthesis.get('questions_for_next_review',[]))}")
             print(f"    Watch-list items:     {len(synthesis.get('watch_list',[]))}")
             print(f"    Data-quality notes:   {len(synthesis.get('data_quality_notes',[]))}")

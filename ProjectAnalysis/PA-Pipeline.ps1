@@ -193,6 +193,10 @@ function Get-DefaultConfig {
         paths = [ordered]@{
             xml_snapshots_folder = ''
             baseline_mpp         = ''
+            # Optional: a PRIOR run's stage_j/narrative.json. When set, Stage M
+            # synthesis adds a "what changed since the last brief" dashboard
+            # element for recurring briefs; blank = first brief, element skipped.
+            prior_brief          = ''
             output_root          = ''
             venv_dir             = $venvDir
             python_exe           = Join-Path $venvDir 'Scripts\python.exe'
@@ -238,28 +242,45 @@ function Get-DefaultConfig {
         }
         critical_path = [ordered]@{
             concurrent_paths_threshold_days = 3
+            # Which snapshot's controller each inter-snapshot day change is
+            # credited to: 'later' (canonical windows convention — whoever was
+            # driving when the movement appeared) or 'earlier' (the incumbent
+            # that held the path during the window). Stage F always writes
+            # attribution_comparison.parquet showing both, so switching is a
+            # reviewed decision, never a silent one.
+            attribution_convention          = 'later'
         }
         charting = [ordered]@{
             dpi          = 150
             font_family  = 'Carlito'
             float_health_bands_days        = @(0, 5, 10, 20)
             completion_range_lookback_weeks = 8
+            # Cap on distinct legend series in the driving-resource scatter -
+            # subs beyond the top N (by |net days|) group into "Other" so a
+            # 30-sub project can't break the chart.
+            legend_max_series               = 10
             forecast_trend_chart = [ordered]@{ annotation_breakpoints = @() }
         }
         buyout_analysis = [ordered]@{
             # Priority-ordered: first stage whose keyword (case-insensitive
-            # substring) appears in a buyout activity name wins. Keywords below
-            # are seeded from typical SCI buyout activity naming - review/adjust
-            # to match your schedule's wording. (buyout_analysis.py needs the
-            # {stage, keywords} dict shape, NOT a bare list of stage names.)
+            # substring) appears in a buyout activity name wins. Defaults match
+            # the canonical Harrison brief's Methodology D.4 taxonomy verbatim;
+            # review/adjust to match your schedule's wording. Ordering matters:
+            # Decision/setup precedes Submittal approval so 'bid'/'quote'/
+            # 'selection' win before the broader 'approv'; Purchase-order cycle
+            # precedes it so 'Order Approved' files as PO-cycle. Leaves no
+            # keyword matches land in stage_fallback ('Unclassified') and Stage
+            # H reports their % as a QC line - a project with different naming
+            # fails loudly instead of misfiling silently.
+            # (buyout_analysis.py needs the {stage, keywords} dict shape.)
             stage_classification = @(
-                [ordered]@{ stage = 'Order/Procurement';  keywords = @('order') },
-                [ordered]@{ stage = 'Subcontract Award';  keywords = @('subcontract','contract') },
-                [ordered]@{ stage = 'Lead-Time/Delivery'; keywords = @('lead time','delivery','deliver') },
-                [ordered]@{ stage = 'Submittal/Approval'; keywords = @('submittal','approv','selection','bid','quote') },
-                [ordered]@{ stage = 'Milestone';          keywords = @('complete','milestone') }
+                [ordered]@{ stage = 'Decision / setup';              keywords = @('selection','decided','bid','quote','lead time determined','distribution') },
+                [ordered]@{ stage = 'Purchase-order cycle';          keywords = @('order') },
+                [ordered]@{ stage = 'Subcontract execution';         keywords = @('subcontract','contract') },
+                [ordered]@{ stage = 'Submittal approval';            keywords = @('submittal','approv') },
+                [ordered]@{ stage = 'Package close-out / milestone'; keywords = @('bought','complete','milestone') }
             )
-            stage_fallback      = 'Other'
+            stage_fallback      = 'Unclassified'
             top_packages_count  = 25
         }
         qc = [ordered]@{

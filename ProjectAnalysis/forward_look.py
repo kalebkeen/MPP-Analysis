@@ -301,7 +301,7 @@ def build_look_ahead(tasks_df, preds_df, cfg, bucket_resolver):
     if muid is None:
         return pd.DataFrame(), None
 
-    path = trace_driving_path(
+    path, _terminus = trace_driving_path(
         muid,
         finish_of=lambda u: lk["finish"].get(u),
         preds_map=lk["preds"],
@@ -328,6 +328,168 @@ def build_look_ahead(tasks_df, preds_df, cfg, bucket_resolver):
     if not df.empty:
         df = df.sort_values("forecast_finish", na_position="last").reset_index(drop=True)
     return df, muid
+
+
+# ---------------------------------------------------------------------------
+# 5. Per-building driving paths  (5.7 — superintendent/PM-facing)
+# ---------------------------------------------------------------------------
+
+def build_building_paths(tasks_df, preds_df, cfg, bucket_resolver):
+    """Backward driving-path trace against each configured building's own
+    finish (latest snapshot only): per-building controlling activity + a short
+    look-ahead. This is what makes the per-building section actionable — the
+    project-level path only names whichever building drives the overall
+    finish; a superintendent needs *their* building's path."""
+    building_names = cfg["buildings"]["names"]
+    buyout_prefixes = cfg["schedule"]["buyout_outline_prefixes"]
+    complete_thresh = cfg["schedule"].get("percent_complete_threshold_complete", 100)
+
+    lk = build_lookups(tasks_df, preds_df)
+
+    # children index for subtree walks
+    children = {}
+    for u, p in lk["parent"].items():
+        if p is not None:
+            children.setdefault(p, []).append(u)
+
+    def subtree_leaves(root):
+        out, stack = [], [root]
+        while stack:
+            cur = stack.pop()
+            kids = children.get(cur, [])
+            if not kids and cur != root and not lk["summary"].get(cur):
+                out.append(cur)
+            stack.extend(kids)
+        return out
+
+    rows = []
+    for bname in building_names:
+        summ = [u for u, nm in lk["name"].items()
+                if nm.strip().lower() == bname.strip().lower() and lk["summary"].get(u)]
+        if not summ:
+            continue
+        root = summ[0]
+        leaves = subtree_leaves(root)
+        if not leaves:
+            continue
+        # anchor = the building's own finish: its latest-finishing leaf
+        # (a turnover milestone when the schedule has one, since that is by
+        # definition the last thing in the building's subtree)
+        anchor = max(leaves, key=lambda u: (lk["finish"].get(u) or pd.Timestamp.min))
+        path, terminus = trace_driving_path(
+            anchor,
+            finish_of=lambda u: lk["finish"].get(u),
+            preds_map=lk["preds"],
+            exists=lambda u: u in lk["finish"],
+        )
+        incomplete = [u for u in path
+                      if not lk["summary"].get(u)
+                      and not is_buyout_outline(lk["outline"].get(u), buyout_prefixes)
+                      and lk["pct"].get(u, 0.0) < complete_thresh]
+        incomplete.sort(key=lambda u: (lk["finish"].get(u) or pd.Timestamp.max))
+        ctl = incomplete[0] if incomplete else None
+        look = " → ".join(lk["name"].get(u, "") for u in incomplete[:4])
+        rows.append({
+            "building":              bname,
+            "anchor_activity":       lk["name"].get(anchor, ""),
+            "anchor_finish":         lk["finish"].get(anchor),
+            "controlling_activity":  lk["name"].get(ctl, "") if ctl else "(all complete)",
+            "controlling_resources": (lk["res"].get(ctl, "").strip() or "(unassigned)") if ctl else "",
+            "controlling_finish":    lk["finish"].get(ctl) if ctl else None,
+            "remaining_on_path":     len(incomplete),
+            "look_ahead":            look,
+            "terminus_reason":       terminus,
+        })
+    cols = ["building", "anchor_activity", "anchor_finish", "controlling_activity",
+            "controlling_resources", "controlling_finish", "remaining_on_path",
+            "look_ahead", "terminus_reason"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+# ---------------------------------------------------------------------------
+# 6. S-curve + slip velocity  (5.8 — executive-facing)
+# ---------------------------------------------------------------------------
+
+def build_progress_curve(cfg, ordered_snaps):
+    """Planned vs actual percent-complete over time (baseline-duration-
+    weighted, construction scope). Planned %(d) integrates each leaf's
+    baseline window up to d; actual % is each snapshot's pct_complete
+    weighted the same way — so the two series share one denominator."""
+    buyout_prefixes = cfg["schedule"]["buyout_outline_prefixes"]
+    cols = ["uid", "outline_number", "is_summary", "pct_complete",
+            "baseline_start", "baseline_finish", "baseline_duration"]
+    records = []
+    baseline = None  # (starts, finishes, durs) from the latest snapshot with baselines
+    for snap in ordered_snaps:
+        try:
+            df = pd.read_parquet(snap["tasks_path"], columns=cols)
+        except Exception:
+            continue
+        m = (~df["is_summary"]) & \
+            (~df["outline_number"].astype(str).map(
+                lambda s: is_buyout_outline(s, buyout_prefixes)))
+        sub = df[m]
+        wb = sub[sub["baseline_duration"].notna() & (sub["baseline_duration"] > 0)]
+        if wb.empty:
+            continue
+        total = wb["baseline_duration"].sum()
+        actual_pct = float((wb["pct_complete"].fillna(0) * wb["baseline_duration"]).sum() / total)
+        records.append({"date": pd.Timestamp(snap["date"]), "actual_pct": actual_pct})
+        baseline = wb
+    if not records or baseline is None:
+        return pd.DataFrame(columns=["date", "planned_pct", "actual_pct"])
+
+    bs = pd.to_datetime(baseline["baseline_start"])
+    bf = pd.to_datetime(baseline["baseline_finish"])
+    dur = baseline["baseline_duration"].astype(float)
+    total = dur.sum()
+    span_days = (bf - bs).dt.days.clip(lower=1)
+
+    curve = pd.DataFrame(records)
+    planned = []
+    for d in curve["date"]:
+        frac = ((d - bs).dt.days / span_days).clip(0, 1)
+        planned.append(float((frac * dur).sum() / total * 100.0))
+    curve["planned_pct"] = planned
+    return curve[["date", "planned_pct", "actual_pct"]]
+
+
+def build_slip_velocity(comp_range):
+    """Trailing regression of forecast-finish movement over the completion-
+    range window: 'at the current trend, completion projects to X.' This is
+    an EMPIRICAL TREND read (same epistemics as the completion range), not a
+    forecast — the framing matters and is repeated wherever it renders."""
+    series = comp_range.get("series") or []
+    pts = [(pd.Timestamp(d), pd.Timestamp(f)) for d, f in series if f is not None]
+    if len(pts) < 3:
+        return {"available": False}
+    x = pd.Series([p[0].toordinal() for p in pts], dtype=float)
+    y = pd.Series([p[1].toordinal() for p in pts], dtype=float)
+    n = len(x)
+    sx, sy = x.sum(), y.sum()
+    sxx = (x * x).sum(); sxy = (x * y).sum()
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return {"available": False}
+    slope = (n * sxy - sx * sy) / denom          # finish days moved per calendar day
+    intercept = (sy - slope * sx) / n
+    out = {
+        "available": True,
+        "window_snapshots": n,
+        "slope_days_per_week": round(slope * 7, 2),
+    }
+    if slope < 1.0:
+        # fixed point where the trending forecast equals the calendar
+        x_star = intercept / (1.0 - slope)
+        try:
+            out["projected_completion"] = str(pd.Timestamp.fromordinal(int(round(x_star))).date())
+            out["diverging"] = False
+        except (ValueError, OverflowError):
+            out["diverging"] = True
+    else:
+        # forecast slipping >= 1 day per day — trend never converges
+        out["diverging"] = True
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -519,12 +681,19 @@ def main():
     comp_range = build_completion_range(cfg, snaps, milestone_name)
     # 4. look-ahead
     look_df, look_muid = build_look_ahead(latest_tasks, latest_preds, cfg, bucket_resolver)
+    # 5. per-building driving paths (5.7)
+    bpath_df = build_building_paths(latest_tasks, latest_preds, cfg, bucket_resolver)
+    # 6. S-curve + slip velocity (5.8)
+    curve_df = build_progress_curve(cfg, snaps)
+    velocity = build_slip_velocity(comp_range)
 
     # ── persist ───────────────────────────────────────────────────────────
     turnover_df.to_parquet(stage_dir / "building_turnover.parquet", index=False)
     band_df.to_parquet(stage_dir / "float_health.parquet", index=False)
     if not look_df.empty:
         look_df.to_parquet(stage_dir / "look_ahead.parquet", index=False)
+    bpath_df.to_parquet(stage_dir / "building_driving_paths.parquet", index=False)
+    curve_df.to_parquet(stage_dir / "progress_curve.parquet", index=False)
     with open(stage_dir / "completion_range.json", "w", encoding="utf-8") as f:
         json.dump(comp_range, f, indent=2, default=str)
 
@@ -540,6 +709,9 @@ def main():
         "float_summary": float_summary,
         "completion_range": {k: v for k, v in comp_range.items() if k != "series"},
         "look_ahead_count": len(look_df),
+        "building_paths_count": len(bpath_df),
+        "slip_velocity": velocity,
+        "progress_curve_points": len(curve_df),
     }
     with open(stage_dir / "forward_report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=str)
@@ -571,6 +743,20 @@ def main():
         for _, r in look_df.head(8).iterrows():
             print(f"    {_d(r['forecast_finish']):<8} {r['activity'][:34]:<34} "
                   f"{r['resources'][:16]:<16} {r['bucket']}")
+
+    if not bpath_df.empty:
+        print(f"\n  Per-building driving paths ({len(bpath_df)}):")
+        for _, r in bpath_df.iterrows():
+            print(f"    {r['building'][:22]:<24} controls: {r['controlling_activity'][:32]:<34} "
+                  f"{r['controlling_resources'][:16]}")
+
+    if velocity.get("available"):
+        if velocity.get("diverging"):
+            print(f"\n  Slip velocity: {velocity['slope_days_per_week']:+.1f} d/wk over last "
+                  f"{velocity['window_snapshots']} snapshots — trend does not converge (slipping ≥1 day/day)")
+        else:
+            print(f"\n  Slip velocity: {velocity['slope_days_per_week']:+.1f} d/wk — at current trend, "
+                  f"completion projects to {velocity['projected_completion']} (empirical trend, not a forecast)")
 
     print(f"\n{'='*60}")
     print(f"  Workbook : {xlsx_path}")
