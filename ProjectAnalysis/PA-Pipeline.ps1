@@ -1372,6 +1372,10 @@ function Invoke-PythonStage {
     # char like the status glyphs ✓ / ✗. Read it back as UTF-8 on this side too.
     $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
     $psi.EnvironmentVariables["PYTHONUTF8"]       = "1"
+    # Unbuffered: with a piped stdout python block-buffers (~8KB), so a long
+    # stage like extraction can run for many minutes while the Run Log shows
+    # nothing, then dump everything at once — which reads as a hang.
+    $psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
 
@@ -1822,6 +1826,7 @@ function Invoke-NativeProcessWithStatus {
     # non-cp1252 characters that would otherwise crash the child on a piped stdout.
     $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
     $psi.EnvironmentVariables["PYTHONUTF8"]       = "1"
+    $psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
 

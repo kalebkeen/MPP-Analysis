@@ -466,6 +466,8 @@ def process_snapshot(snap, cfg, bucket_resolver):
 
     # ── predecessor map ───────────────────────────────────────────────────
     preds_map = {}
+    driving_flagged = 0
+    total_rels = 0
     for row in preds.itertuples(index=False):
         tu = int(row.task_uid)
         pu = getattr(row, "pred_task_uid", None)
@@ -475,6 +477,9 @@ def process_snapshot(snap, cfg, bucket_resolver):
         drv = getattr(row, "is_driving", None)
         drv = bool(drv) if (drv is True or drv is False) else (
             True if str(drv).lower() == "true" else (False if str(drv).lower() == "false" else None))
+        total_rels += 1
+        if drv is True:
+            driving_flagged += 1
         preds_map.setdefault(tu, []).append((pu, drv))
 
     # ── locate finish milestone ───────────────────────────────────────────
@@ -503,6 +508,8 @@ def process_snapshot(snap, cfg, bucket_resolver):
         "path_len": 0,
         "constr_on_path": 0,
         "terminus_reason": "",
+        "driving_flagged_rels": driving_flagged,
+        "total_rels": total_rels,
     }
     if milestone_uid is None:
         return result
@@ -706,6 +713,13 @@ def build_ledger(snapshot_records, attribution="later"):
 
     concurrent_weeks = int(sum(1 for r in recs if r.get("concurrent_count", 0) > 0))
     constraint_terminated = int(sum(1 for r in recs if r.get("terminus_reason", "")))
+    # How often MS Project's driving flag actually carried signal. Some
+    # schedules store it on no relationship at all — the trace then runs
+    # entirely on the latest-finishing-predecessor estimate, and the brief's
+    # Methodology B should say so rather than overclaim (Stage L reads this).
+    flagged = sum(r.get("driving_flagged_rels", 0) for r in snapshot_records)
+    rels = sum(r.get("total_rels", 0) for r in snapshot_records)
+    driving_flag_rate = round(flagged / rels * 100, 2) if rels else None
 
     totals = {
         "gross_days_added": gross_added,
@@ -720,6 +734,7 @@ def build_ledger(snapshot_records, attribution="later"):
         # snapshots whose driving-path trace ended at a hard-constraint/deadline
         # governed task rather than a no-predecessor terminus (Methodology B note)
         "constraint_terminated_traces": constraint_terminated,
+        "driving_flag_rate_pct": driving_flag_rate,
     }
 
     return windows_df, by_res, waterfall_df, timeline_df, totals
@@ -928,6 +943,10 @@ def main():
               f"— finish pressured from >1 direction (see timeline)")
     print(f"  Attribution convention: {attribution} "
           f"(comparison vs '{other}' in attribution_comparison.parquet)")
+    dfr = totals.get("driving_flag_rate_pct")
+    if dfr is not None and dfr < 1.0:
+        print(f"  NOTE: only {dfr}% of relationships carry MS Project's driving flag — "
+              f"the trace ran on the latest-finishing-predecessor estimate throughout.")
     if totals.get("constraint_terminated_traces"):
         print(f"  Constraint-terminated traces: {totals['constraint_terminated_traces']} "
               f"snapshot(s) — driving path ends at a hard-constraint/deadline-governed task")

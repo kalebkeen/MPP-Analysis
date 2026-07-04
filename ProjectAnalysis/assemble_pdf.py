@@ -819,12 +819,33 @@ def section_part_v(output_root, narrative, ST, cfg):
         "in which the slip occurred (standard windows-analysis practice)."
     )
     story.append(Paragraph("Methodology B — How the Critical-Path Delay Analysis Was Derived", ST["h2"]))
+    # Self-disclosure: if this project's files carry the driving flag on
+    # (almost) no relationships, the trace ran on the fallback estimate
+    # throughout — the methodology text must say so, not overclaim.
+    flag_sentence = (
+        "At each step, the driving predecessor is identified via the MS Project driving flag; "
+        "where no flag is set, the latest-finishing predecessor is used as a best estimate. ")
+    try:
+        led = json.loads((output_root / "stage_f" / "delay_ledger_report.json")
+                         .read_text(encoding="utf-8"))
+        dfr = led.get("totals", {}).get("driving_flag_rate_pct")
+        if dfr is not None and dfr < 1.0:
+            flag_sentence = (
+                "In this project's schedule files, MS Project's driving flag is stored on "
+                f"effectively no relationships ({dfr}%), so at each step the latest-finishing "
+                "predecessor is followed as the best estimate of the binding logic. ")
+        elif dfr is not None:
+            flag_sentence = (
+                "At each step, the driving predecessor is identified via the MS Project driving "
+                f"flag (carried on {dfr}% of this project's relationships); where no flag is set, "
+                "the latest-finishing predecessor is used as a best estimate. ")
+    except Exception:
+        pass
     meth_b = narrative.get("methodology_b", (
         "For each weekly snapshot, the analysis locates the finish milestone (Project Complete; "
         "falls back to the latest-finishing leaf if absent) and walks <b>backward</b> through the "
         "predecessor network to reconstruct the driving path — the single chain that sets the finish "
-        "date. At each step, the driving predecessor is identified via the MS Project driving flag; "
-        "where no flag is set, the latest-finishing predecessor is used as a best estimate. "
+        "date. " + flag_sentence +
         "A visited-set prevents loops. Where a task's dates are governed by a hard constraint or "
         "deadline rather than logic, the trace records that terminus as constraint-controlled "
         "instead of estimating through it. The controlling activity is the earliest-finishing "
@@ -1151,8 +1172,17 @@ def main():
         "/Subject": f"As of {cfg['project'].get('analysis_status_date', '')}",
         "/Creator": "SCI Schedule Analytics Pipeline — Stage L",
     })
-    with open(final_path, "wb") as f:
-        writer.write(f)
+    try:
+        with open(final_path, "wb") as f:
+            writer.write(f)
+    except PermissionError:
+        # By far the most common cause: the previous brief is open in a PDF
+        # viewer, and Windows will not let an open file be overwritten.
+        sys.exit(
+            f"Cannot write {final_path.name} — the file is open in another "
+            "program (usually your PDF viewer). Close the PDF and run "
+            "Stage L again; everything up to this final write succeeded."
+        )
 
     # Cleanup temps
     for p in [body_tmp, body_path, cover_toc_path]:
