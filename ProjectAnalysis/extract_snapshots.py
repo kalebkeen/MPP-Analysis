@@ -485,6 +485,27 @@ def main():
     snap_dir.mkdir(parents=True, exist_ok=True)
     pred_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Cache validity vs config ─────────────────────────────────────────
+    # The baseline-slot settings are baked into the parquets at extraction
+    # time; a column-presence check alone cannot see that the SLOTS changed.
+    # extraction_meta.json records the slots the cache was built with — if
+    # the config disagrees, the whole cache is invalid and everything is
+    # re-extracted (same effect as --force), loudly.
+    meta_path = stage_dir / "extraction_meta.json"
+    cache_meta_ok = False
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            cache_meta_ok = (meta.get("buyout_baseline_number") == buyout_bn
+                             and meta.get("construction_baseline_number") == construction_bn)
+        except Exception:
+            cache_meta_ok = False
+    if not cache_meta_ok and not args.force and any(snap_dir.glob("*.parquet")):
+        print("  NOTE: cached extraction was built with different baseline-slot "
+              f"settings (config now: buyout={buyout_bn}, construction={construction_bn}) "
+              "— re-extracting everything.\n")
+        args.force = True
+
     print(f"\n{'='*60}")
     print(f"  Stage C — Data Extraction")
     print(f"  Project : {project_name}")
@@ -616,6 +637,15 @@ def main():
     report_path = stage_dir / "extraction_report.json"
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=str)
+
+    # Record the settings this cache was built with (see cache-validity check
+    # in main's preamble) — written only after a successful pass.
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "buyout_baseline_number": buyout_bn,
+            "construction_baseline_number": construction_bn,
+            "generated": datetime.now().isoformat(timespec="seconds"),
+        }, f, indent=2)
 
     # ── Summary ──────────────────────────────────────────────────────────
     print(f"\n{'='*60}")

@@ -214,11 +214,38 @@ def discover_snapshots(cfg: dict, manifest_path: str | None):
             if d is not None:
                 source = "filename"
 
+        if d is None:
+            # 3) content date. NEVER fall back to file mtime for ordering:
+            # Stage B's COM export re-saves every file, so mtime carries the
+            # EXPORT date and sorts an undated file *after* every real
+            # snapshot. That exact failure once made a zero-progress Sep-2024
+            # planning draft the "latest snapshot" — Stage G then reported 0%
+            # complete, a stale forecast, and planning-era turnover dates on
+            # the dashboard. Instead, date the file by its own data: the
+            # latest actual date it contains; a file with no actuals predates
+            # its own earliest scheduled start, so it can never sort last.
+            try:
+                body = pd.read_parquet(
+                    p, columns=["actual_start", "actual_finish", "sched_start"])
+                acts = pd.concat([pd.to_datetime(body["actual_start"], errors="coerce"),
+                                  pd.to_datetime(body["actual_finish"], errors="coerce")]).dropna()
+                if not acts.empty:
+                    d = acts.max().date()
+                    source = "content-actuals"
+                else:
+                    starts = pd.to_datetime(body["sched_start"], errors="coerce").dropna()
+                    if not starts.empty:
+                        d = starts.min().date()
+                        source = "content-schedule (no progress — dated at its own planned start)"
+            except Exception:
+                pass
+
         if d is not None:
             sort_ts = pd.Timestamp(d)              # midnight — same-date keys are equal
             disp_date = d
         else:
-            # 3) file modification time (always available; sub-day precision retained)
+            # 4) file modification time — absolute last resort, near-guaranteed
+            # to be wrong after Stage B (see above); warned loudly below.
             sort_ts = pd.Timestamp.fromtimestamp(p.stat().st_mtime)
             disp_date = sort_ts.date()
             source = "modified"
@@ -234,9 +261,17 @@ def discover_snapshots(cfg: dict, manifest_path: str | None):
             "rows": p.stat().st_size,  # proxy for "largest file" dedup
         })
 
+    inferred = [s for s in snaps if s["date_source"].startswith("content")]
+    if inferred:
+        print("  NOTE: no filename date on "
+              + ", ".join(f"'{s['stem']}' (dated {s['date']} from {s['date_source']})"
+                          for s in inferred)
+              + " — rename the file with its real date, or use --manifest, for exact control.")
     if used_mtime:
-        print("  NOTE: some snapshots had no status date or filename date — "
-              "ordered those by file modification time. Provide --manifest for exact control.")
+        print("  WARNING: ordered by file-modified time (likely WRONG — Stage B re-stamps "
+              "files at export): "
+              + ", ".join(f"'{s['stem']}'" for s in snaps if s["date_source"] == "modified")
+              + ". Rename with a date or provide --manifest.")
 
     # de-duplicate identical keys, keeping the largest file. Date-based keys at
     # midnight collapse same-date snapshots (per the brief); distinct mtimes don't.
