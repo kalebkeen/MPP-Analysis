@@ -140,15 +140,25 @@ def find_milestone_uid(lk, milestone_name: str):
 def build_turnover(tasks_df: pd.DataFrame, cfg: dict):
     complete_thresh = cfg["schedule"].get("percent_complete_threshold_complete", 100)
     building_names = cfg["buildings"]["names"]
+    buyout_prefixes = cfg["schedule"]["buyout_outline_prefixes"]
     bld_phase = {}
     for ph in cfg["buildings"].get("phases", []):
         for b in ph.get("buildings", []):
             bld_phase[b] = ph.get("label", f"Phase {ph.get('phase_id','')}")
 
+    # Building lookups must exclude the buyout branch: buyout packages group
+    # their activities by building, so a schedule can carry DOZENS of summary
+    # tasks named e.g. "Building 1" under buyout (New Town: 53 matches, 52 of
+    # them buyout). Taking the first row by order silently returned a buyout
+    # sub-group — 100% complete with a 2025 finish — instead of the one real
+    # construction building summary.
+    scope = tasks_df[~tasks_df["outline_number"].astype(str).map(
+        lambda s: is_buyout_outline(s, buyout_prefixes))]
+
     rows, missing = [], []
     for bname in building_names:
-        sub = tasks_df[(tasks_df["name"].astype(str).str.strip().str.lower()
-                        == bname.strip().lower()) & (tasks_df["is_summary"] == True)]
+        sub = scope[(scope["name"].astype(str).str.strip().str.lower()
+                     == bname.strip().lower()) & (scope["is_summary"] == True)]
         if sub.empty:
             missing.append(bname)
             continue
@@ -364,8 +374,13 @@ def build_building_paths(tasks_df, preds_df, cfg, bucket_resolver):
 
     rows = []
     for bname in building_names:
+        # Same buyout-branch exclusion as build_turnover: buyout packages
+        # contain summary tasks named after buildings; only the construction
+        # branch's building summary is the real one.
         summ = [u for u, nm in lk["name"].items()
-                if nm.strip().lower() == bname.strip().lower() and lk["summary"].get(u)]
+                if nm.strip().lower() == bname.strip().lower()
+                and lk["summary"].get(u)
+                and not is_buyout_outline(lk["outline"].get(u), buyout_prefixes)]
         if not summ:
             continue
         root = summ[0]

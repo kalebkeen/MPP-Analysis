@@ -417,11 +417,20 @@ def derive_kpis(output_root, cfg):
     except Exception:
         pass
     try:
-        # construction % complete — average across buildings from turnover
+        # construction % complete — prefer the S-curve's latest actual point:
+        # ALL construction leaves, baseline-duration weighted. The old
+        # buildings-mean over-reads whenever the configured buildings are done
+        # but non-building buckets (site work etc.) are still open — New Town
+        # showed "100%" while its live critical path sat in Site Work.
         bt = _load_parquet(output_root / "stage_g" / "building_turnover.parquet")
-        if not bt.empty and "pct_complete" in bt.columns:
-            pct = bt["pct_complete"].mean()
-            kpis["construction_pct"] = f"{pct:.0f}%"
+        pc = _load_parquet(output_root / "stage_g" / "progress_curve.parquet")
+        # floor, never round: 99.7% rounding up to "100%" while tasks remain
+        # open is exactly the kind of overstatement that costs the brief its
+        # credibility. "100%" must mean complete.
+        if not pc.empty and "actual_pct" in pc.columns:
+            kpis["construction_pct"] = f"{int(pc['actual_pct'].iloc[-1])}%"
+        elif not bt.empty and "pct_complete" in bt.columns:
+            kpis["construction_pct"] = f"{int(bt['pct_complete'].mean())}%"
         # weeks behind
         baseline = cfg["schedule"].get("baseline_date")
         sc_filt = _load_parquet(output_root / "stage_f" / "snapshot_controlling.parquet")
@@ -762,7 +771,8 @@ def section_part_iv(output_root, narrative, ST, cfg):
         story.append(Paragraph("Per-Building Driving Paths — What Each Building Is Waiting On", ST["h2"]))
         display = bp.copy()
         for c in ("anchor_finish", "controlling_finish"):
-            display[c] = display[c].map(lambda v: _fmt_date(v))
+            display[c] = display[c].map(
+                lambda v: "" if pd.isna(v) else _fmt_date(v))
         cols = [
             ("Building",   "building",              1.15*inch, "l", False),
             ("Controls",   "controlling_activity",  1.7*inch,  "l", False),
