@@ -158,7 +158,13 @@ def select_single_snapshot(cfg: dict, snapshot_arg, parquets):
         return by_stem[chosen]
     dated = [(p, parse_stem_date(p.stem)) for p in parquets]
     if any(d is not None for _, d in dated):
-        return max(dated, key=lambda t: (t[1] is not None, t[1] or date.min))[0]
+        # Same-date tie-break: LARGEST file, matching discover_snapshots'
+        # de-dup rule — otherwise the single-snapshot stages (D/E/H) and the
+        # series stages (F/G/K) can silently analyze two DIFFERENT files of
+        # the same date (observed: "J New Town 6.23.26" vs the larger
+        # "M New Town 6.23.26 - Meeting").
+        return max(dated, key=lambda t: (t[1] is not None, t[1] or date.min,
+                                         t[0].stat().st_size))[0]
     return sorted(parquets, key=lambda p: p.stem)[-1]
 
 
