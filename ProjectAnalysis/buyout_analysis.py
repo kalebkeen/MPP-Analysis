@@ -616,6 +616,10 @@ def main():
     grouping_df = pd.read_parquet(grouping_path)
     packages_df = pd.read_parquet(packages_path)
     tasks_df = pd.read_parquet(snapshot_path)
+    # Effective calendar + original-baseline basis (shared helpers, Stage E)
+    from construction_variance import apply_effective_calendar, apply_original_baselines
+    apply_effective_calendar(cfg, output_root)
+    tasks_df = apply_original_baselines(tasks_df, cfg, output_root, "buyout_")
 
     res = build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg)
 

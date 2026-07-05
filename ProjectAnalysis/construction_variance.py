@@ -129,6 +129,59 @@ def working_days(start, finish, weekmask: str = "1111100", holidays=None):
 # Resource aggregation
 # ---------------------------------------------------------------------------
 
+def apply_effective_calendar(cfg, output_root):
+    """working_calendar.mode='auto' (default): use the project's OWN calendar
+    extracted by Stage C (stage_c/calendar.json — e.g. New Town ran 7 days/
+    week with holidays); 'manual': use the config weekmask/holidays as-is.
+    Mutates cfg so every downstream reader sees the effective calendar."""
+    cal = cfg.setdefault("working_calendar", {})
+    if str(cal.get("mode", "auto")).lower() != "manual":
+        p = Path(output_root) / "stage_c" / "calendar.json"
+        if p.exists():
+            j = json.loads(p.read_text(encoding="utf-8"))
+            cal["weekmask"] = j.get("weekmask", cal.get("weekmask", "1111100"))
+            cal["holidays"] = j.get("holidays", cal.get("holidays", []))
+            print(f"  Calendar: {cal['weekmask']} + {len(cal['holidays'])} holiday(s) "
+                  f"(from the schedule's own calendar)")
+
+
+def apply_original_baselines(tasks_df, cfg, output_root, prefix):
+    """schedule.baseline_basis='original' (default): replace this snapshot's
+    saved {prefix}baseline_* values with each UID's FIRST-ever-saved baseline
+    (stage_c/original_baselines.parquet) — the original plan of record.
+    Rebaselining (New Town: 27% of UIDs) silently rewrites the saved baseline;
+    the scheduler's direction is to measure against the original promise."""
+    if str(cfg.get("schedule", {}).get("baseline_basis", "original")).lower() != "original":
+        return tasks_df
+    p = Path(output_root) / "stage_c" / "original_baselines.parquet"
+    if not p.exists():
+        return tasks_df
+    cols = [f"{prefix}baseline_{f}" for f in ("start", "finish", "duration")]
+    ob = pd.read_parquet(p, columns=["uid"] + cols)
+    ob = ob.drop_duplicates("uid").set_index("uid")
+    df = tasks_df.set_index("uid")
+    replaced = 0
+    for c in cols:
+        if c not in df.columns:
+            continue
+        orig = ob[c].reindex(df.index)
+        # normalize dtypes: the reference parquet stores python date objects,
+        # snapshots store datetime64 — a mixed object column breaks reductions
+        if c.endswith(("start", "finish")):
+            orig = pd.to_datetime(orig, errors="coerce")
+            cur = pd.to_datetime(df[c], errors="coerce")
+        else:
+            orig = pd.to_numeric(orig, errors="coerce")
+            cur = pd.to_numeric(df[c], errors="coerce")
+        changed = orig.notna() & (orig != cur)
+        replaced = max(replaced, int(changed.sum()))
+        df[c] = orig.where(orig.notna(), cur)
+    if replaced:
+        print(f"  Baseline basis: ORIGINAL plan — {replaced} task(s) differ from "
+              f"the snapshot's current saved baseline")
+    return df.reset_index()
+
+
 def merge_resources(series: pd.Series) -> str:
     """Collect distinct resource tokens across a rolled-up line's instances."""
     seen = []
@@ -615,6 +668,8 @@ def main():
     print(f"{'='*60}\n")
 
     tasks_df = pd.read_parquet(snapshot_path)
+    apply_effective_calendar(cfg, output_root)
+    tasks_df = apply_original_baselines(tasks_df, cfg, output_root, "construction_")
     full_df, top_n_df, per_building_df, bucket_summary_df, report = \
         build_construction_variance(tasks_df, cfg)
 

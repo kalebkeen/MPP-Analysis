@@ -681,6 +681,10 @@ def main():
     print(f"  Snapshots available: {len(snaps)}\n")
 
     latest_tasks = pd.read_parquet(latest["tasks_path"])
+    # baseline_basis='original': turnover baselines = each building's first-
+    # ever-saved baseline finish, not the latest rebaselined value
+    from construction_variance import apply_original_baselines
+    latest_tasks = apply_original_baselines(latest_tasks, cfg, output_root, "")
     try:
         latest_preds = pd.read_parquet(latest["preds_path"])
     except (FileNotFoundError, OSError):

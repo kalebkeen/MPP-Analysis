@@ -46,6 +46,15 @@ import pandas as pd
 # Config loader
 # ---------------------------------------------------------------------------
 
+def parse_stem_date_safe(stem):
+    """Filename date for ordering the original-baseline scan; None if undated."""
+    try:
+        from critical_path import parse_stem_date
+        return parse_stem_date(stem)
+    except Exception:
+        return None
+
+
 def load_config(config_path: str) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -646,6 +655,67 @@ def main():
             "construction_baseline_number": construction_bn,
             "generated": datetime.now().isoformat(timespec="seconds"),
         }, f, indent=2)
+
+    # ── Project calendar (stage_c/calendar.json) ─────────────────────────
+    # The project's OWN calendar (working weekdays + holiday exceptions),
+    # read from the latest schedule file — New Town, e.g., ran 7 days/week
+    # with holidays, which config-default Mon–Fri math would misstate.
+    # Consumed by stages E/H when working_calendar.mode == 'auto'.
+    try:
+        from org.mpxj.reader import UniversalProjectReader
+        cal_src = xml_files[-1]
+        proj = UniversalProjectReader().read(str(cal_src))
+        cal = proj.getDefaultCalendar()
+        import java.time as _jt
+        days = [_jt.DayOfWeek.MONDAY, _jt.DayOfWeek.TUESDAY, _jt.DayOfWeek.WEDNESDAY,
+                _jt.DayOfWeek.THURSDAY, _jt.DayOfWeek.FRIDAY, _jt.DayOfWeek.SATURDAY,
+                _jt.DayOfWeek.SUNDAY]
+        weekmask = "".join("1" if cal.isWorkingDay(d) else "0" for d in days)
+        holidays = []
+        for exc in cal.getCalendarExceptions():
+            if not exc.getWorking():
+                d0 = pd.Timestamp(str(exc.getFromDate()))
+                d1 = pd.Timestamp(str(exc.getToDate()))
+                for d in pd.date_range(d0, d1):
+                    holidays.append(str(d.date()))
+        with open(stage_dir / "calendar.json", "w", encoding="utf-8") as f:
+            json.dump({"weekmask": weekmask, "holidays": holidays,
+                       "source_file": cal_src.name, "calendar_name": str(cal.getName())},
+                      f, indent=2)
+        print(f"\n  Project calendar ({cal.getName()}): weekmask {weekmask}, "
+              f"{len(holidays)} holiday day(s)  → stage_c/calendar.json")
+    except Exception as e:
+        print(f"\n  NOTE: could not extract project calendar ({e}) — stages fall "
+              "back to the config working_calendar.")
+
+    # ── Original baselines (stage_c/original_baselines.parquet) ──────────
+    # Per UID, the FIRST baseline values ever saved across the snapshot
+    # series — the original plan of record. With rebaselining (New Town:
+    # 27% of UIDs), the latest snapshot's saved baseline is NOT the original
+    # promise; schedule.baseline_basis='original' makes variance/slip stages
+    # compare against these instead.
+    try:
+        ordered = sorted(snap_dir.glob("*.parquet"),
+                         key=lambda p: (parse_stem_date_safe(p.stem) is None,
+                                        parse_stem_date_safe(p.stem) or datetime.max.date()))
+        bl_cols = ["baseline_start", "baseline_finish", "baseline_duration",
+                   "buyout_baseline_start", "buyout_baseline_finish", "buyout_baseline_duration",
+                   "construction_baseline_start", "construction_baseline_finish",
+                   "construction_baseline_duration"]
+        first = {}
+        for p in ordered:
+            df = pd.read_parquet(p, columns=["uid"] + bl_cols)
+            has_bl = df[df[bl_cols].notna().any(axis=1)]
+            for row in has_bl.itertuples(index=False):
+                if int(row.uid) not in first:
+                    first[int(row.uid)] = row
+        if first:
+            ob = pd.DataFrame(first.values())
+            ob.to_parquet(stage_dir / "original_baselines.parquet", index=False)
+            print(f"  Original baselines: {len(ob)} UIDs (first-saved values) "
+                  "→ stage_c/original_baselines.parquet")
+    except Exception as e:
+        print(f"  NOTE: could not build original baselines ({e}).")
 
     # ── Summary ──────────────────────────────────────────────────────────
     print(f"\n{'='*60}")

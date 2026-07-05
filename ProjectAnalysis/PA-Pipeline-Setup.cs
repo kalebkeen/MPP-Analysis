@@ -823,6 +823,7 @@ namespace PASetup
             sb.Append("    \"buyout_baseline_number\": 0,\n");
             sb.Append("    \"construction_baseline_number\": 1,\n");
             sb.Append("    \"analysis_snapshot\": \"\",\n");
+            sb.Append("    \"baseline_basis\": \"original\",\n");
             sb.Append("    \"snapshot_count\": null\n");
             sb.Append("  },\n");
             sb.Append("  \"buildings\": {\n");
@@ -843,6 +844,7 @@ namespace PASetup
             sb.Append("    \"bucket_overrides\": []\n");
             sb.Append("  },\n");
             sb.Append("  \"working_calendar\": {\n");
+            sb.Append("    \"mode\": \"auto\",\n");
             sb.Append("    \"weekmask\": \"1111100\",\n");
             sb.Append("    \"holidays\": []\n");
             sb.Append("  },\n");

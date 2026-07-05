@@ -217,6 +217,11 @@ function Get-DefaultConfig {
             buyout_baseline_number              = 0       # which MS Project baseline slot holds the buyout baseline (0 = primary "Baseline")
             construction_baseline_number        = 1       # construction work is commonly baselined into Baseline1
             analysis_snapshot                   = ''      # which snapshot stem stages D/E/H analyze; blank = latest by date
+            # 'original' (default): variances/slips compare against each UID's
+            # FIRST-ever-saved baseline across the snapshot series (the original
+            # plan of record — rebaselining does not rewrite history).
+            # 'current': compare against the analysis snapshot's saved baseline.
+            baseline_basis                      = 'original'
             snapshot_count                      = $null
         }
         buildings = [ordered]@{
@@ -237,7 +242,11 @@ function Get-DefaultConfig {
             bucket_overrides             = @()   # optional — list of { task_name: "..." }
         }
         working_calendar = [ordered]@{
-            weekmask = '1111100'    # Mon-Fri working, Sat/Sun off
+            # 'auto' (default): use the schedule's OWN calendar, extracted by
+            # Stage C to stage_c/calendar.json (weekmask + holiday exceptions).
+            # 'manual': use the weekmask/holidays below as-is.
+            mode     = 'auto'
+            weekmask = '1111100'    # manual-mode fallback: Mon-Fri, Sat/Sun off
             holidays = @()
         }
         critical_path = [ordered]@{
