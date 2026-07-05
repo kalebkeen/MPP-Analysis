@@ -104,7 +104,7 @@ $script:Stages = @(
 )
 
 # pip package name -> python import name, only where they differ
-$script:PipImportMap = @{ 'jpype1' = 'jpype' }
+$script:PipImportMap = @{ 'jpype1' = 'jpype'; 'python-docx' = 'docx' }
 
 # Deep venv smoke test. A plain "import X" per package is NOT enough: an
 # interrupted wheel extraction can leave a stub package dir where the import
@@ -114,7 +114,7 @@ $script:PipImportMap = @{ 'jpype1' = 'jpype' }
 # bootstrap package for real AND requires each to have a __file__. Module list
 # must stay in lockstep with pip_packages in Get-DefaultConfig and with the
 # same one-liner in PA-Pipeline-Setup.cs (VENV_SMOKE_TEST_CODE).
-$script:VenvSmokeTestCode = "import mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,sys; [sys.exit('CORRUPT:'+m.__name__) for m in (mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber) if getattr(m,'__file__',None) is None]; print('SMOKE-OK')"
+$script:VenvSmokeTestCode = "import mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,docx,sys; [sys.exit('CORRUPT:'+m.__name__) for m in (mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,docx) if getattr(m,'__file__',None) is None]; print('SMOKE-OK')"
 
 # Strip any ==version pin, then map pip name -> import name.
 function Get-PipImportName {
@@ -288,6 +288,9 @@ function Get-DefaultConfig {
             negative_variance_watch_buildings  = @()
         }
         pdf_assembly = [ordered]@{
+            # 'pdf' (presentation copy), 'docx' (editable Word rendition),
+            # or 'both'. Selected via the dropdown on the Run tab.
+            output_format         = 'pdf'
             brief_title           = 'Executive Schedule Brief'
             brief_subtitle        = ''
             company_name          = 'SCI'
@@ -326,7 +329,8 @@ function Get-DefaultConfig {
             # list below.
             pip_packages = @(
                 'mpxj==16.4.1','jpype1==1.7.1','pandas==3.0.3','pyarrow==24.0.0','openpyxl==3.1.5',
-                'matplotlib==3.11.0','reportlab==5.0.0','pypdf==6.14.2','pikepdf==10.9.1','pdfplumber==0.11.10'
+                'matplotlib==3.11.0','reportlab==5.0.0','pypdf==6.14.2','pikepdf==10.9.1','pdfplumber==0.11.10',
+                'python-docx==1.2.0'
             )
         }
         # Output markers below match the filenames the scripts actually write.
@@ -1074,6 +1078,23 @@ $pnlStageBtns.Left = 12; $pnlStageBtns.Top = 472; $pnlStageBtns.Width = 1000; $p
 $tabStages.Controls.Add($pnlStageBtns)
 
 $btnOpenNarrative = New-Btn 'Open Narrative JSON  (Stage J)' 0 4 220 32 ([System.Drawing.Color]::FromArgb(100,100,140))
+
+# Brief output format (pdf_assembly.output_format) — consumed by Stage L.
+$lblBriefFmt = New-Label 'Brief format:' 300 12 80
+$pnlStageBtns.Controls.Add($lblBriefFmt)
+$cmbBriefFmt = New-Object System.Windows.Forms.ComboBox
+$cmbBriefFmt.Left = 384; $cmbBriefFmt.Top = 8; $cmbBriefFmt.Width = 150
+$cmbBriefFmt.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+[void]$cmbBriefFmt.Items.AddRange(@('PDF', 'Word (docx)', 'PDF + Word'))
+$cmbBriefFmt.SelectedIndex = 0
+$script:BriefFmtMap  = @{ 'PDF' = 'pdf'; 'Word (docx)' = 'docx'; 'PDF + Word' = 'both' }
+$cmbBriefFmt.Add_SelectedIndexChanged({
+    if ($null -eq $script:Config) { return }
+    $script:Config.pdf_assembly.output_format = $script:BriefFmtMap[[string]$cmbBriefFmt.SelectedItem]
+    Save-ProjectConfig
+})
+$pnlStageBtns.Controls.Add($cmbBriefFmt)
+
 $btnRunSelected    = New-Btn '▶ Run Selected'          560 4 140 32 ([System.Drawing.Color]::FromArgb(31,78,120))
 $btnRunAll         = New-Btn '▶▶ Run All'              708 4 110 32 ([System.Drawing.Color]::FromArgb(31,78,120))
 $btnRunSynthesize  = New-Btn 'Run Selected + Synthesize' 826 4 174 32 ([System.Drawing.Color]::FromArgb(20,120,40))
@@ -1230,6 +1251,13 @@ function Refresh-StagesGrid {
         $rowIdx = $dgvStages.Rows.Add($wasChecked, $stage.Code, $stage.Name, $stage.Description, $glyph.Text, $lastRun)
         $dgvStages.Rows[$rowIdx].Cells['Status'].Style.ForeColor = $glyph.Color
         $dgvStages.Rows[$rowIdx].Cells['Status'].Style.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    }
+    # sync the brief-format dropdown from config (Merge-ConfigDefaults heals
+    # older configs that predate the output_format key)
+    if ($null -ne $script:Config) {
+        $fmt = [string]$script:Config.pdf_assembly.output_format
+        $label = switch ($fmt) { 'docx' { 'Word (docx)' } 'both' { 'PDF + Word' } default { 'PDF' } }
+        if ([string]$cmbBriefFmt.SelectedItem -ne $label) { $cmbBriefFmt.SelectedItem = $label }
     }
 }
 

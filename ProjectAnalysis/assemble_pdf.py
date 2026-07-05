@@ -1038,6 +1038,232 @@ def build_cover_toc(path, cfg, toc_entries, ST):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Editable Word (.docx) rendition — pdf_assembly.output_format: pdf|docx|both
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TAG_RX = None
+
+def _plain(text):
+    """Strip the minimal inline markup (<b>, <i>, <br/>) used in narrative
+    strings — the Word rendition is editable text, not styled runs."""
+    global _TAG_RX
+    import re
+    if _TAG_RX is None:
+        _TAG_RX = re.compile(r"<[^>]+>")
+    return _TAG_RX.sub("", str(text or "")).strip()
+
+
+def build_docx(cfg, output_root, narrative, kpis, stage_dir, project):
+    """Editable Word rendition of the brief: same sections, narrative, tables
+    and chart PNGs as the PDF, structured with real Word headings so the
+    document outline, styles, and TOC behave natively in Word. Deliberately
+    NOT a pixel-copy of the PDF — the point is easy editing."""
+    import docx
+    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    NAVY_RGB = RGBColor(0x1F, 0x4E, 0x78)
+    doc = docx.Document()
+    doc.core_properties.title = f"{project} — Executive Schedule Brief"
+    style = doc.styles["Normal"]
+    style.font.name = "Carlito"
+    style.font.size = Pt(10.5)
+    for i in (1, 2):
+        h = doc.styles[f"Heading {i}"]
+        h.font.name = "Carlito"
+        h.font.color.rgb = NAVY_RGB
+
+    status = cfg["project"].get("analysis_status_date", "")
+    k_dir = output_root / "stage_k"
+
+    def heading(text, level=1):
+        doc.add_heading(text, level=level)
+
+    def para(text, bold=False):
+        t = _plain(text)
+        if not t:
+            return
+        p = doc.add_paragraph()
+        run = p.add_run(t)
+        run.bold = bold
+
+    def bullets(items):
+        for it in items or []:
+            t = _plain(it)
+            if t:
+                doc.add_paragraph(t, style="List Bullet")
+
+    def chart(png_name, caption=""):
+        p = k_dir / png_name
+        if p.exists():
+            doc.add_picture(str(p), width=Inches(6.5))
+            if caption:
+                c = doc.add_paragraph(caption)
+                c.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                c.runs[0].font.size = Pt(8)
+
+    def table(df, cols):
+        """cols: list of (header, df_column). Writes a plain Word table."""
+        if df is None or df.empty:
+            return
+        t = doc.add_table(rows=1, cols=len(cols))
+        t.style = "Light Grid Accent 1"
+        for j, (hdr, _) in enumerate(cols):
+            cell = t.rows[0].cells[j]
+            cell.text = hdr
+            cell.paragraphs[0].runs[0].bold = True
+        for _, r in df.iterrows():
+            row = t.add_row()
+            for j, (_, key) in enumerate(cols):
+                v = r.get(key, "")
+                if pd.isna(v):
+                    v = ""
+                elif isinstance(v, float):
+                    v = f"{v:,.1f}"
+                row.cells[j].text = str(v)
+
+    # ── Title page ────────────────────────────────────────────────────────
+    tp = doc.add_paragraph()
+    tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = tp.add_run(f"\n\n{project}\n")
+    r.font.size = Pt(28); r.bold = True; r.font.color.rgb = NAVY_RGB
+    sub = doc.add_paragraph()
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sub.add_run(f"{cfg['pdf_assembly'].get('brief_title', 'Executive Schedule Brief')}\n"
+                f"As of {status}  ·  {cfg['pdf_assembly'].get('company_name', '')}\n"
+                f"(Editable Word rendition — the PDF is the presentation copy)")
+    doc.add_page_break()
+
+    # ── Native Word TOC field (reader presses F9 / updates on open) ──────
+    heading("Table of Contents", 1)
+    tocp = doc.add_paragraph()
+    fld = docx.oxml.OxmlElement("w:fldSimple")
+    fld.set(docx.oxml.ns.qn("w:instr"), r'TOC \o "1-2" \h \z \u')
+    run = docx.oxml.OxmlElement("w:r")
+    txt = docx.oxml.OxmlElement("w:t")
+    txt.text = "Right-click → Update Field to populate this table of contents."
+    run.append(txt)
+    fld.append(run)
+    tocp._p.append(fld)
+    doc.add_page_break()
+
+    # ── Dashboard ─────────────────────────────────────────────────────────
+    heading("Executive Status Dashboard", 1)
+    kpi_rows = pd.DataFrame([{
+        "Forecast completion": kpis["forecast_completion"],
+        "Credible range": kpis["credible_range"],
+        "Construction complete": kpis["construction_pct"],
+        "Behind baseline": kpis["weeks_behind"],
+        "Buildings in progress": kpis["buildings_in_progress"],
+        "Remaining work ≤5 days float": kpis["tight_float_pct"],
+    }]).T.reset_index()
+    kpi_rows.columns = ["KPI", "Value"]
+    table(kpi_rows, [("KPI", "KPI"), ("Value", "Value")])
+    heading("Bottom Line", 2);    para(narrative.get("bottom_line"))
+    heading("Top Risks Right Now", 2)
+    bullets([narrative.get(k) for k in ("risk_1", "risk_2", "risk_3", "risk_4")])
+    sbd = narrative.get("status_by_dimension") or []
+    if sbd:
+        heading("Status by Dimension", 2)
+        sdf = pd.DataFrame(sbd, columns=["dimension", "status", "note"])
+        table(sdf, [("Dimension", "dimension"), ("Status", "status"), ("Note", "note")])
+    dec = [d for d in (narrative.get("decisions_requested") or []) if _plain(d)]
+    if dec:
+        heading("Decisions Requested / Recommended Actions", 2); bullets(dec)
+    wc = _plain(narrative.get("what_changed_since_last_brief", ""))
+    if wc:
+        heading("What Changed Since the Last Brief", 2); para(wc)
+
+    heading("Executive Overview", 1)
+    para(narrative.get("executive_overview"))
+
+    # ── Parts I–VI (headers from the same single source as the PDF) ──────
+    heading(SECTION_TITLES["part_i"], 1)
+    para(narrative.get("part_i_intro"))
+    chart("forecast_trend.png", "Forecast completion vs. baseline, each snapshot.")
+    para(narrative.get("part_i_trend_analysis"))
+    chart("bucket_trajectories.png", "Cumulative net variance by bucket.")
+    para(narrative.get("part_i_bucket_analysis"))
+
+    heading(SECTION_TITLES["part_ii"], 1)
+    para(narrative.get("part_ii_intro"))
+    tl = _load_parquet(output_root / "stage_f" / "controlling_timeline.parquet")
+    table(tl, [("From", "from_date"), ("To", "to_date"),
+               ("Controlling activity", "controlling_name"),
+               ("Resource", "controlling_resources"),
+               ("Driving finish", "driving_finish")])
+    chart("driving_resource.png"); chart("delay_waterfall.png"); chart("resource_net_bar.png")
+    para(narrative.get("part_ii_ledger_analysis"))
+
+    heading(SECTION_TITLES["part_iii"], 1)
+    para(narrative.get("part_iii_intro"))
+    bs = _load_parquet(output_root / "stage_e" / "bucket_summary.parquet")
+    table(bs, [("Bucket", "bucket"), ("Lines", "line_count"),
+               ("Net variance (d)", "net_variance")] if not bs.empty and "line_count" in bs.columns
+          else [("Bucket", "bucket"), ("Net variance (d)", "net_variance")])
+    tn = _load_parquet(output_root / "stage_e" / "top_n_all_buckets.parquet")
+    table(tn.head(24) if not tn.empty else tn,
+          [("Rank", "rank"), ("Bucket", "bucket"), ("Task", "task_name"),
+           ("Resources", "resources"), ("Base (d)", "baseline_span"),
+           ("Act (d)", "actual_span"), ("Var (d)", "abs_variance")])
+    para(narrative.get("part_iii_per_building_note"))
+
+    heading(SECTION_TITLES["part_iv"], 1)
+    para(narrative.get("part_iv_intro"))
+    bt = _load_parquet(output_root / "stage_g" / "building_turnover.parquet")
+    table(bt, [("Building", "building"), ("% Done", "pct_complete"),
+               ("Baseline", "baseline_finish"), ("Forecast", "forecast_finish"),
+               ("Slip (d)", "slip_days"), ("Status", "status")])
+    chart("building_lollipop.png"); chart("float_histogram.png")
+    chart("s_curve.png"); chart("float_erosion.png")
+    bp = _load_parquet(output_root / "stage_g" / "building_driving_paths.parquet")
+    if not bp.empty:
+        heading("Per-Building Driving Paths", 2)
+        table(bp, [("Building", "building"), ("Controls", "controlling_activity"),
+                   ("Resource", "controlling_resources"),
+                   ("Remaining", "remaining_on_path"), ("Bldg finish", "anchor_finish")])
+
+    heading(SECTION_TITLES["part_v"], 1)
+    para("See the PDF rendition for the full Methodology A–D text and the "
+         "schedule-health panel; they are generated from the same data.")
+    for nkey, label in (("data_quality_notes", "Data-Quality Notes"),
+                        ("questions_for_next_review", "Questions for Next Review"),
+                        ("watch_list", "Watch List"), ("scope_gaps", "Scope Gaps")):
+        items = narrative.get(nkey) or []
+        if items:
+            heading(label, 2); bullets(items)
+
+    if buyout_in_scope(output_root):
+        heading(SECTION_TITLES["part_vi"], 1)
+        para(narrative.get("part_vi_bottom_line"))
+        bsum = _load_parquet(output_root / "stage_h" / "buyout_summary.parquet")
+        table(bsum, [("Bucket", "bucket"), ("Packages", "packages"),
+                     ("Activities", "activities"), ("Baseline Σ (d)", "baseline_span"),
+                     ("Actual Σ (d)", "actual_span"), ("Abs Var (d)", "abs_var")])
+        para(narrative.get("part_vi_stage_breakdown_note"))
+        sb = _load_parquet(output_root / "stage_h" / "buyout_stage_breakdown.parquet")
+        table(sb, [("Stage", "stage"), ("Occurrences", "occurrences"),
+                   ("Avg Base (d)", "avg_baseline"), ("Avg Act (d)", "avg_actual"),
+                   ("Avg Var (d)", "avg_var")])
+        chart("buyout_scatter.png"); chart("po_cycle_trend.png")
+        para(narrative.get("part_vi_methodology_d_note"))
+
+    heading(SECTION_TITLES["appendix_a"], 1)
+    para(narrative.get("appendix_a_note"))
+    para("The full task-level table is in the PDF rendition and the Stage E "
+         "workbook (construction_variance_full / Construction_Variance_*.xlsx), "
+         "which is already editable in Excel.")
+
+    out = stage_dir / f"{project.replace(' ', '_')}_Executive_Brief_{status.replace('-', '')}.docx"
+    try:
+        doc.save(str(out))
+    except PermissionError:
+        sys.exit(f"Cannot write {out.name} — the file is open in Word. "
+                 "Close it and run Stage L again.")
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1074,6 +1300,19 @@ def main():
     print(f"  KPIs derived: {kpis}")
     print(f"  Narrative keys: {list(narrative.keys()) or ['(none — placeholders will be used)']}")
     print(f"  Part VI (buyout): {'included' if include_part_vi else 'omitted — no buyout scope'}\n")
+
+    # ── Output format: pdf (default) | docx | both ────────────────────────
+    out_fmt = str(cfg.get("pdf_assembly", {}).get("output_format", "pdf") or "pdf").lower()
+    if out_fmt in ("docx", "both"):
+        try:
+            docx_path = build_docx(cfg, output_root, narrative, kpis, stage_dir, project)
+            print(f"  Word rendition: {docx_path}")
+        except ImportError:
+            print("  WARNING: python-docx is not installed in the venv — "
+                  "Word rendition skipped. Run Repair Packages on the Settings tab.")
+        if out_fmt == "docx":
+            print("  output_format=docx — skipping PDF build.")
+            return 0
 
     # (title, bookmark_key, fallback_page) — fallback is only used if a section's
     # bookmark somehow never recorded a page (defensive; shouldn't happen since

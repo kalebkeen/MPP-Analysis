@@ -44,7 +44,8 @@ namespace PASetup
         // with pip_packages in Get-DefaultConfig (PA-Pipeline.ps1).
         public static readonly string[] PipPackages = new string[] {
             "mpxj==16.4.1", "jpype1==1.7.1", "pandas==3.0.3", "pyarrow==24.0.0", "openpyxl==3.1.5",
-            "matplotlib==3.11.0", "reportlab==5.0.0", "pypdf==6.14.2", "pikepdf==10.9.1", "pdfplumber==0.11.10"
+            "matplotlib==3.11.0", "reportlab==5.0.0", "pypdf==6.14.2", "pikepdf==10.9.1", "pdfplumber==0.11.10",
+            "python-docx==1.2.0"
         };
 
         // Deep import smoke test run right after package install: imports every
@@ -53,8 +54,8 @@ namespace PASetup
         // pip names (jpype1 -> jpype). Kept in lockstep with $script:VenvSmokeTestCode
         // in PA-Pipeline.ps1.
         public const string VenvSmokeTestCode =
-            "import mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,sys; " +
-            "[sys.exit('CORRUPT:'+m.__name__) for m in (mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber) if getattr(m,'__file__',None) is None]; " +
+            "import mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,docx,sys; " +
+            "[sys.exit('CORRUPT:'+m.__name__) for m in (mpxj,jpype,pandas,pyarrow,openpyxl,matplotlib,reportlab,pypdf,pikepdf,pdfplumber,docx) if getattr(m,'__file__',None) is None]; " +
             "print('SMOKE-OK')";
 
         // ── Embedded PA-Pipeline.ps1 ─────────────────────────────────────────
@@ -873,6 +874,7 @@ namespace PASetup
             sb.Append("    \"negative_variance_watch_buildings\": []\n");
             sb.Append("  },\n");
             sb.Append("  \"pdf_assembly\": {\n");
+            sb.Append("    \"output_format\": \"pdf\",\n");
             sb.Append("    \"brief_title\": \"Executive Schedule Brief\",\n");
             sb.Append("    \"brief_subtitle\": \"\",\n");
             sb.Append("    \"company_name\": \"SCI\",\n");
