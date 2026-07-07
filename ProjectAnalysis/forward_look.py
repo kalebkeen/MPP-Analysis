@@ -428,57 +428,81 @@ def build_building_paths(tasks_df, preds_df, cfg, bucket_resolver):
 # ---------------------------------------------------------------------------
 
 def build_progress_curve(cfg, ordered_snaps):
-    """Planned vs actual percent-complete over time (baseline-duration-
-    weighted, construction scope). Planned %(d) integrates each leaf's
-    baseline window up to d; actual % is each snapshot's pct_complete
-    weighted the same way — so the two series share one denominator."""
+    """Planned vs actual percent-complete over time (construction scope).
+
+    ACTUAL %(snapshot) = that snapshot's own baseline-duration-weighted
+    pct_complete — the progress the schedule itself reports (the dashboard
+    'construction complete' headline reads the latest actual). This is NOT
+    re-weighted to the baseline of record, so pinning a baseline doesn't move
+    the reported % done.
+
+    PLANNED %(d) integrates the baseline-of-RECORD window (the pinned/original
+    baseline, per schedule.baseline_basis) up to d, so the planned line runs to
+    100% at the baseline finish — independent of the snapshot's own saved
+    baseline (which may be rebaselined or, for a buyout-only slot-0 baseline,
+    carry no construction dates at all)."""
     buyout_prefixes = cfg["schedule"]["buyout_outline_prefixes"]
+    output_root = cfg["paths"]["output_root"]
     cols = ["uid", "outline_number", "is_summary", "pct_complete",
             "baseline_start", "baseline_finish", "baseline_duration",
             "construction_baseline_start", "construction_baseline_finish",
             "construction_baseline_duration"]
+
+    def coalesce_constr(d):
+        # Construction scope uses the construction baseline slot; the generic
+        # baseline_* columns are always slot 0. Prefer construction_* per leaf.
+        for base_c, con_c in (("baseline_start",    "construction_baseline_start"),
+                              ("baseline_finish",   "construction_baseline_finish"),
+                              ("baseline_duration", "construction_baseline_duration")):
+            if con_c in d.columns:
+                d[base_c] = d[con_c].where(d[con_c].notna(), d[base_c])
+        return d
+
+    def constr_leaves(d):
+        m = (~d["is_summary"]) & (~d["outline_number"].astype(str).map(
+            lambda s: is_buyout_outline(s, buyout_prefixes)))
+        return d[m]
+
     records = []
-    baseline = None  # (starts, finishes, durs) from the latest snapshot with baselines
+    last_snap = None
     for snap in ordered_snaps:
         try:
             df = pd.read_parquet(snap["tasks_path"], columns=cols)
         except Exception:
             continue
-        # This is construction-scope, so use the construction baseline slot
-        # (schedule.construction_baseline_number). The generic baseline_* columns
-        # are always slot 0, which for some projects (e.g. a buyout-only slot-0
-        # baseline) holds no construction dates — leaving the whole S-curve empty.
-        # Prefer construction_baseline_* per leaf, falling back to generic.
-        for base_c, con_c in (("baseline_start",    "construction_baseline_start"),
-                              ("baseline_finish",   "construction_baseline_finish"),
-                              ("baseline_duration", "construction_baseline_duration")):
-            if con_c in df.columns:
-                df[base_c] = df[con_c].where(df[con_c].notna(), df[base_c])
-        m = (~df["is_summary"]) & \
-            (~df["outline_number"].astype(str).map(
-                lambda s: is_buyout_outline(s, buyout_prefixes)))
-        sub = df[m]
-        wb = sub[sub["baseline_duration"].notna() & (sub["baseline_duration"] > 0)]
+        df = coalesce_constr(df)                       # snapshot's OWN baseline
+        wb = constr_leaves(df)
+        wb = wb[wb["baseline_duration"].notna() & (wb["baseline_duration"] > 0)]
         if wb.empty:
             continue
         total = wb["baseline_duration"].sum()
         actual_pct = float((wb["pct_complete"].fillna(0) * wb["baseline_duration"]).sum() / total)
         records.append({"date": pd.Timestamp(snap["date"]), "actual_pct": actual_pct})
-        baseline = wb
-    if not records or baseline is None:
+        last_snap = snap
+    if not records or last_snap is None:
         return pd.DataFrame(columns=["date", "planned_pct", "actual_pct"])
 
-    bs = pd.to_datetime(baseline["baseline_start"])
-    bf = pd.to_datetime(baseline["baseline_finish"])
-    dur = baseline["baseline_duration"].astype(float)
-    total = dur.sum()
+    # PLANNED baseline = baseline of record applied to the latest snapshot's
+    # construction leaves. apply_original_baselines is a no-op for basis
+    # 'current', so the planned line then uses the snapshot's own baseline.
+    from construction_variance import apply_original_baselines
+    pdf = pd.read_parquet(last_snap["tasks_path"], columns=cols)
+    pdf = apply_original_baselines(pdf, cfg, output_root, "construction_")
+    pdf = apply_original_baselines(pdf, cfg, output_root, "")
+    pdf = coalesce_constr(pdf)
+    pb = constr_leaves(pdf)
+    pb = pb[pb["baseline_duration"].notna() & (pb["baseline_duration"] > 0)]
+    bs = pd.to_datetime(pb["baseline_start"])
+    bf = pd.to_datetime(pb["baseline_finish"])
+    dur = pb["baseline_duration"].astype(float)
+    total_p = dur.sum()
     span_days = (bf - bs).dt.days.clip(lower=1)
 
     curve = pd.DataFrame(records)
     planned = []
     for d in curve["date"]:
         frac = ((d - bs).dt.days / span_days).clip(0, 1)
-        planned.append(float((frac * dur).sum() / total * 100.0))
+        planned.append(float((frac * dur).sum() / total_p * 100.0))
     curve["planned_pct"] = planned
     return curve[["date", "planned_pct", "actual_pct"]]
 
