@@ -703,17 +703,48 @@ def main():
                    "construction_baseline_start", "construction_baseline_finish",
                    "construction_baseline_duration"]
         first = {}
+        first_src = {}   # uid -> stem of the snapshot that supplied its baseline
         for p in ordered:
             df = pd.read_parquet(p, columns=["uid"] + bl_cols)
             has_bl = df[df[bl_cols].notna().any(axis=1)]
             for row in has_bl.itertuples(index=False):
                 if int(row.uid) not in first:
                     first[int(row.uid)] = row
+                    first_src[int(row.uid)] = p.stem
         if first:
             ob = pd.DataFrame(first.values())
             ob.to_parquet(stage_dir / "original_baselines.parquet", index=False)
             print(f"  Original baselines: {len(ob)} UIDs (first-saved values) "
                   "→ stage_c/original_baselines.parquet")
+            # Provenance: which snapshot won the "first baseline per UID" race.
+            # The race is ordered by FILENAME DATE ONLY, so an undated stem
+            # sorts last and a mis-dated one sorts wrong — this breakdown makes
+            # that visible instead of silently redefining the plan of record.
+            src_counts = {}
+            for stem in first_src.values():
+                src_counts[stem] = src_counts.get(stem, 0) + 1
+            ranked = sorted(src_counts.items(), key=lambda kv: kv[1], reverse=True)
+            total = len(first_src)
+            for stem, cnt in ranked[:5]:
+                print(f"    baseline source: {cnt / total * 100:.1f}% "
+                      f"({cnt} UIDs) from '{stem}'")
+            if len(ranked) > 5:
+                rest = sum(c for _, c in ranked[5:])
+                print(f"    baseline source: {rest / total * 100:.1f}% "
+                      f"({rest} UIDs) from {len(ranked) - 5} other snapshot(s)")
+            if len(ranked) > 1:
+                print("    NOTE: baselines came from more than one snapshot — "
+                      "expected for tasks added after the original plan; "
+                      "unexpected if the earliest file should cover everything.")
+            src_json = {
+                "total_uids": total,
+                "sources": [{"stem": s, "uids": c,
+                             "pct": round(c / total * 100, 1)}
+                            for s, c in ranked],
+            }
+            with open(stage_dir / "original_baseline_sources.json", "w",
+                      encoding="utf-8") as f:
+                json.dump(src_json, f, indent=2)
     except Exception as e:
         print(f"  NOTE: could not build original baselines ({e}).")
 
