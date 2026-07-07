@@ -492,6 +492,35 @@ def check_uid_persistence(all_snapshots: list[str], snapshot_dir: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Building name aliases
+# ---------------------------------------------------------------------------
+
+def apply_building_name_aliases(tasks_df, cfg):
+    """Relabel task names per config `buildings.name_aliases`.
+
+    A schedule may label a building differently than the team refers to it
+    (Harrison Family: the physical Building 4 is named "BUILDING 5" in every
+    snapshot). Applying the rename here — once, at the source — means every
+    downstream stage (bucket resolver, turnover, building paths, brief) sees the
+    intended name and the config's building list matches without per-stage
+    special-casing. Match is exact on the trimmed name, case-insensitive, so it
+    catches both the construction summary ("BUILDING 5") and the buyout
+    summaries ("Building 5") for the same structure.
+
+    Config shape:  "buildings": { "name_aliases": { "Building 5": "Building 4" } }
+    """
+    aliases = (cfg.get("buildings", {}) or {}).get("name_aliases", {}) or {}
+    if not aliases or "name" not in tasks_df.columns:
+        return tasks_df
+    lookup = {str(k).strip().lower(): str(v) for k, v in aliases.items()}
+    norm = tasks_df["name"].astype(str).str.strip().str.lower()
+    mask = norm.isin(lookup)
+    if mask.any():
+        tasks_df.loc[mask, "name"] = norm[mask].map(lookup)
+    return tasks_df
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -614,6 +643,7 @@ def main():
         try:
             tasks_df, preds_df = extract_file(xml_path, snapshot_label,
                                               buyout_bn, construction_bn)
+            tasks_df = apply_building_name_aliases(tasks_df, cfg)
 
             # ── Unit validation: durations should be reasonable wd values
             # Flag any duration > 500 wd as a likely unit-conversion issue

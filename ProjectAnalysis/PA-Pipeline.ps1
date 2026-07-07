@@ -225,8 +225,9 @@ function Get-DefaultConfig {
             snapshot_count                      = $null
         }
         buildings = [ordered]@{
-            names  = @()    # REQUIRED — building summary-task names exactly as they appear in the schedule
-            phases = @()    # optional — list of { phase_id, label, buildings: [names] }
+            names        = @()    # REQUIRED — building summary-task names exactly as they appear in the schedule
+            phases       = @()    # optional — list of { phase_id, label, buildings: [names] }
+            name_aliases = [ordered]@{}   # optional — { "<schedule name>": "<display name>" }; Stage C relabels matching tasks (e.g. schedule "Building 5" -> "Building 4")
         }
         construction_variance = [ordered]@{
             buckets                = @()    # REQUIRED — variance bucket names (e.g. Site Work, Site Concrete, ...)

@@ -828,7 +828,8 @@ namespace PASetup
             sb.Append("  },\n");
             sb.Append("  \"buildings\": {\n");
             sb.Append("    \"names\": [],\n");
-            sb.Append("    \"phases\": []\n");
+            sb.Append("    \"phases\": [],\n");
+            sb.Append("    \"name_aliases\": {}\n");
             sb.Append("  },\n");
             sb.Append("  \"construction_variance\": {\n");
             sb.Append("    \"buckets\": [],\n");
