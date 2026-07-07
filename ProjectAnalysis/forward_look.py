@@ -432,7 +432,9 @@ def build_progress_curve(cfg, ordered_snaps):
     weighted the same way — so the two series share one denominator."""
     buyout_prefixes = cfg["schedule"]["buyout_outline_prefixes"]
     cols = ["uid", "outline_number", "is_summary", "pct_complete",
-            "baseline_start", "baseline_finish", "baseline_duration"]
+            "baseline_start", "baseline_finish", "baseline_duration",
+            "construction_baseline_start", "construction_baseline_finish",
+            "construction_baseline_duration"]
     records = []
     baseline = None  # (starts, finishes, durs) from the latest snapshot with baselines
     for snap in ordered_snaps:
@@ -440,6 +442,16 @@ def build_progress_curve(cfg, ordered_snaps):
             df = pd.read_parquet(snap["tasks_path"], columns=cols)
         except Exception:
             continue
+        # This is construction-scope, so use the construction baseline slot
+        # (schedule.construction_baseline_number). The generic baseline_* columns
+        # are always slot 0, which for some projects (e.g. a buyout-only slot-0
+        # baseline) holds no construction dates — leaving the whole S-curve empty.
+        # Prefer construction_baseline_* per leaf, falling back to generic.
+        for base_c, con_c in (("baseline_start",    "construction_baseline_start"),
+                              ("baseline_finish",   "construction_baseline_finish"),
+                              ("baseline_duration", "construction_baseline_duration")):
+            if con_c in df.columns:
+                df[base_c] = df[con_c].where(df[con_c].notna(), df[base_c])
         m = (~df["is_summary"]) & \
             (~df["outline_number"].astype(str).map(
                 lambda s: is_buyout_outline(s, buyout_prefixes)))
