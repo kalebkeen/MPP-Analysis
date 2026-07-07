@@ -146,12 +146,13 @@ def apply_effective_calendar(cfg, output_root):
 
 
 def apply_original_baselines(tasks_df, cfg, output_root, prefix):
-    """schedule.baseline_basis='original' (default): replace this snapshot's
-    saved {prefix}baseline_* values with each UID's FIRST-ever-saved baseline
-    (stage_c/original_baselines.parquet) — the original plan of record.
-    Rebaselining (New Town: 27% of UIDs) silently rewrites the saved baseline;
-    the scheduler's direction is to measure against the original promise."""
-    if str(cfg.get("schedule", {}).get("baseline_basis", "original")).lower() != "original":
+    """Replace this snapshot's saved {prefix}baseline_* values with the plan of
+    record in stage_c/original_baselines.parquet. Two modes build that file
+    (see extract_snapshots): baseline_basis='original' (default) = each UID's
+    FIRST-ever-saved baseline across snapshots; baseline_basis='baseline_file' =
+    one pinned schedule file's baseline for every task. Either way this applies
+    it. 'current' skips (uses the snapshot's own saved baseline)."""
+    if str(cfg.get("schedule", {}).get("baseline_basis", "original")).lower() not in ("original", "baseline_file"):
         return tasks_df
     p = Path(output_root) / "stage_c" / "original_baselines.parquet"
     if not p.exists():

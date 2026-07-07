@@ -27,7 +27,7 @@
   // ----------------------------------------------------------
   "paths": {
     "snapshots_dir":      "C:\\SCI\\Projects\\Harrison\\Snapshots",   // Folder of weekly MPP/XML exports (Stage C reads here)
-    "baseline_mpp":       "",                    // UNUSED — read by no stage (baselines come from within each snapshot); kept pending Playbook Stage E decision
+    "baseline_mpp":       "",                    // When schedule.baseline_basis='baseline_file', names the ONE exported file (full path or bare name) whose saved baseline becomes the plan of record for EVERY task; ignored for basis 'original'/'current'
     "prior_brief":        "",                    // Optional: prior run's stage_j/narrative.json — enables the what-changed dashboard element
     "output_dir":         "C:\\SCI\\Projects\\Harrison\\Analysis",    // Root output folder — all stage subdirs created here
     "venv_dir":           "C:\\Program Files\\PA-Pipeline\\venv",     // Managed venv — written by installer, read-only in config

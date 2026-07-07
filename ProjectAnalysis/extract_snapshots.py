@@ -760,6 +760,23 @@ def main():
         ordered = sorted(snap_dir.glob("*.parquet"),
                          key=lambda p: (parse_stem_date_safe(p.stem) is None,
                                         parse_stem_date_safe(p.stem) or datetime.max.date()))
+        # baseline_basis='baseline_file': pin ONE schedule file as the baseline
+        # of record for EVERY task, instead of the first-saved-per-UID patchwork.
+        # paths.baseline_mpp names that file (full path or bare name); match its
+        # stem to an extracted snapshot and build baselines from it alone.
+        basis = str((cfg.get("schedule", {}) or {}).get("baseline_basis", "original")).lower()
+        if basis == "baseline_file":
+            ref = str((cfg.get("paths", {}) or {}).get("baseline_mpp", "") or "")
+            want = Path(ref).stem.strip().lower() if ref else ""
+            match = [p for p in ordered if p.stem.strip().lower() == want] if want else []
+            if match:
+                ordered = [match[0]]
+                print(f"  Baseline basis: PINNED FILE — every task's baseline comes "
+                      f"from '{match[0].stem}'")
+            else:
+                print(f"  WARNING: baseline_basis='baseline_file' but paths.baseline_mpp "
+                      f"('{ref}') matches no extracted snapshot. Point it at one of the "
+                      "exported files (by name). Falling back to first-saved-per-UID.")
         bl_cols = ["baseline_start", "baseline_finish", "baseline_duration",
                    "buyout_baseline_start", "buyout_baseline_finish", "buyout_baseline_duration",
                    "construction_baseline_start", "construction_baseline_finish",
