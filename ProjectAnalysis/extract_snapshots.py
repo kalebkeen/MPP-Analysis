@@ -228,7 +228,39 @@ def extract_file(xml_path: Path, snapshot_label: str,
     from org.mpxj.reader import UniversalProjectReader  # type: ignore
 
     reader = UniversalProjectReader()
-    project = reader.read(str(xml_path))
+    try:
+        project = reader.read(str(xml_path))
+    except Exception as read_err:
+        # Some MSPDI exports carry a cross-project external link whose
+        # <CrossProjectName> is a free-text folder path (observed:
+        # "...Week 17 10.6.25 to 10.10."). MPXJ tries to parse a numeric token
+        # out of it and throws NumberFormatException, failing the ENTIRE file —
+        # which for an early baseline snapshot silently drops it from the
+        # analysis. The name is only the external link's display label, with no
+        # bearing on task data, so on failure retry once against a temp copy
+        # with those elements stripped.
+        import re as _re
+        import tempfile as _tempfile
+        try:
+            raw = Path(xml_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            raise read_err
+        cleaned = _re.sub(r"<CrossProjectName>.*?</CrossProjectName>", "",
+                          raw, flags=_re.S)
+        if cleaned == raw:
+            raise read_err   # nothing sanitizable — surface the real error
+        tmp = Path(_tempfile.gettempdir()) / f"pa_sani_{os.getpid()}_{xml_path.stem}.xml"
+        tmp.write_text(cleaned, encoding="utf-8")
+        try:
+            project = UniversalProjectReader().read(str(tmp))
+            print(f"  NOTE: '{xml_path.name}' had an unparseable "
+                  "<CrossProjectName> (cross-project external link) — stripped "
+                  "it and re-read successfully.")
+        finally:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
     # Project status date (data date) — the canonical chronological key.
     # May be null if the scheduler never set it; handled downstream.
