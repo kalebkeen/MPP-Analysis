@@ -240,8 +240,15 @@ def build_buyout_analysis(grouping_df, packages_df, tasks_df, cfg):
 
         pleaves = leaf[leaf["package_uid"] == puid]
         subcats = format_subcats(list(pleaves["sub_category"]), pk["package_name"])
-        astart = pleaves["actual_start"].min() if not pleaves.empty else None
-        afinish = pleaves["actual_finish"].max() if not pleaves.empty else None
+        # actual_start/finish are object columns mixing Python dates with NaN
+        # for not-yet-started leaves; a bare .min()/.max() then compares a date
+        # to a float and raises. Coerce to datetime first so missing values
+        # become NaT (skipped by the reduction) rather than floats.
+        if pleaves.empty:
+            astart = afinish = None
+        else:
+            astart  = pd.to_datetime(pleaves["actual_start"],  errors="coerce").min()
+            afinish = pd.to_datetime(pleaves["actual_finish"], errors="coerce").max()
 
         pkg_rows.append({
             "package_uid":  puid,
