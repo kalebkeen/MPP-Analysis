@@ -164,7 +164,9 @@ def build_turnover(tasks_df: pd.DataFrame, cfg: dict):
             continue
         r = sub.iloc[0]
         pct = float(r["pct_complete"]) if pd.notna(r["pct_complete"]) else 0.0
-        bf = to_ts(r.get("baseline_finish"))
+        # Construction-scope building: prefer the construction baseline slot; the
+        # generic baseline_finish is slot 0, empty when that slot is buyout-only.
+        bf = to_ts(r.get("construction_baseline_finish")) or to_ts(r.get("baseline_finish"))
         ff = to_ts(r.get("sched_finish")) or to_ts(r.get("actual_finish"))
         slip = (pd.Timestamp(ff) - pd.Timestamp(bf)).days if (bf is not None and ff is not None) else None
         rows.append({
@@ -697,6 +699,11 @@ def main():
     # ever-saved baseline finish, not the latest rebaselined value
     from construction_variance import apply_original_baselines
     latest_tasks = apply_original_baselines(latest_tasks, cfg, output_root, "")
+    # Also apply the construction-scoped original baseline: building summaries
+    # are construction scope, and when the generic (slot-0) baseline is
+    # buyout-only their baseline_finish is empty. build_turnover falls back to
+    # construction_baseline_finish, so populate it with the original plan too.
+    latest_tasks = apply_original_baselines(latest_tasks, cfg, output_root, "construction_")
     try:
         latest_preds = pd.read_parquet(latest["preds_path"])
     except (FileNotFoundError, OSError):
