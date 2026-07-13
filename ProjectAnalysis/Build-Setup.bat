@@ -32,7 +32,7 @@ echo.
 echo   Working folder: !SCRIPT_DIR!
 echo.
 
-echo [1/4] Checking for PA-Pipeline-Setup.cs...
+echo [1/5] Checking for PA-Pipeline-Setup.cs...
 if not exist "!CS_FILE!" (
     echo.
     echo ERROR: Cannot find PA-Pipeline-Setup.cs
@@ -44,7 +44,32 @@ if not exist "!CS_FILE!" (
 echo       Found: !CS_FILE!
 echo.
 
-echo [2/4] Locating C# compiler (csc.exe)...
+:: Re-encode the live PA-Pipeline.ps1 + 9 stage scripts into the .cs base64
+:: constants BEFORE compiling. This step is what closes the project's #1
+:: known trap: rebuilding without re-encoding silently ships stale embedded
+:: copies of any edited source. It is deliberately unconditional and fatal
+:: on failure - never skip it.
+echo [2/5] Re-encoding embedded sources (Embed-Sources.ps1)...
+if not exist "!SCRIPT_DIR!\Embed-Sources.ps1" (
+    echo.
+    echo ERROR: Cannot find Embed-Sources.ps1 next to this script.
+    echo        Without it the build would ship stale embedded sources.
+    echo.
+    pause
+    exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "!SCRIPT_DIR!\Embed-Sources.ps1"
+if !ERRORLEVEL! neq 0 (
+    echo.
+    echo ERROR: Embed-Sources.ps1 failed (exit code !ERRORLEVEL!).
+    echo        Aborting so a stale-source installer can't be built.
+    echo.
+    pause
+    exit /b 1
+)
+echo.
+
+echo [3/5] Locating C# compiler (csc.exe)...
 set "CSC="
 
 for %%P in (
@@ -71,7 +96,7 @@ if "!CSC!"=="" (
 echo       Found: !CSC!
 echo.
 
-echo [3/4] Compiling PA-Pipeline-Setup.exe...
+echo [4/5] Compiling PA-Pipeline-Setup.exe...
 echo       (this usually takes 5-15 seconds)
 echo.
 
@@ -141,7 +166,7 @@ if !COMPILE_RESULT! neq 0 (
 )
 
 echo.
-echo [4/4] Verifying output...
+echo [5/5] Verifying output...
 
 if not exist "!OUT_EXE!" (
     echo.
@@ -162,15 +187,13 @@ echo   BUILD SUCCESSFUL
 echo =====================================================
 echo.
 echo   Distribute PA-Pipeline-Setup.exe to your users.
-echo   They double-click it -- it will prompt for admin
-echo   rights automatically (installs to Program Files),
-echo   then install silently.
+echo   They double-click it -- it installs per-user to
+echo   %%LocalAppData%%\Programs\PA-Pipeline with NO admin
+echo   rights and NO UAC prompt.
 echo.
-echo   NOTE: This rebuild only recompiles the .cs file as-is.
-echo   If you edit PA-Pipeline.ps1 or any of the 9 Python
-echo   stage scripts, those embedded copies need to be
-echo   re-encoded into PA-Pipeline-Setup.cs before rebuilding,
-echo   or this exe will still ship the older versions.
+echo   NOTE: Embedded sources were re-encoded from the live
+echo   PA-Pipeline.ps1 and stage scripts in step 2, so this
+echo   exe ships exactly what is on disk right now.
 echo.
 if "!ICON_PATH!"=="" (
     echo   REMINDER: When you have a .ico file, set ICON_PATH

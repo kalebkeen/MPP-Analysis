@@ -44,11 +44,13 @@ $script:AppRoot = Get-AppRoot
 
 # =============================================================================
 # HELPER: Resolve a per-user, ALWAYS-writable folder for live state
-# (project_config.json, venv). $script:AppRoot is typically inside
-# C:\Program Files\, which only the elevated installer can write to - the
-# running app itself never elevates, so anything it needs to write at
-# runtime (config saves, venv creation/reinstall from the Settings tab)
-# must live somewhere a normal user can write without admin rights.
+# (project_config.json, venv). $script:AppRoot is the install dir - now
+# %LocalAppData%\Programs\PA-Pipeline for per-user installs (Program Files
+# on machines that still carry the old admin-installed build) - and is
+# treated as read-only at runtime either way: it holds the program, this
+# holds the state, and the split keeps live state safe across reinstalls.
+# The app never elevates, so everything it writes at runtime (config saves,
+# venv creation/reinstall from the Settings tab) lives here.
 # =============================================================================
 function Get-DataRoot {
     $dir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'PA-Pipeline'
@@ -58,6 +60,23 @@ function Get-DataRoot {
     return $dir
 }
 $script:DataRoot = Get-DataRoot
+
+# True when $Path sits under Program Files (either bitness) — i.e. a location
+# a normal user can't write without elevation. Used by the startup migration
+# below to catch configs written by the old admin-installed builds, whose
+# venv (and bootstrap runtime paths) pointed into Program Files.
+function Test-UnderProgramFiles {
+    param([string]$Path)
+    if ($null -eq $Path -or $Path.Trim() -eq '') { return $false }
+    foreach ($folder in @('ProgramFiles', 'ProgramFilesX86')) {
+        $pf = ''
+        try { $pf = [Environment]::GetFolderPath($folder) } catch { }
+        if ($pf -and $Path.TrimEnd('\').StartsWith($pf.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
 
 # =============================================================================
 # GLOBAL STATE
@@ -1414,6 +1433,17 @@ function Invoke-PythonStage {
     # stage like extraction can run for many minutes while the Run Log shows
     # nothing, then dump everything at once — which reads as a hang.
     $psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
+    # No-admin hardening (env vars only — script bytes and analysis untouched):
+    # the stage scripts sit in AppRoot, which the app must treat as read-only.
+    # Suppress the __pycache__ dirs python would otherwise try to write next to
+    # them, and pin matplotlib's font cache to a per-user writable folder so it
+    # never targets a read-only or wrong-profile location.
+    $psi.EnvironmentVariables["PYTHONDONTWRITEBYTECODE"] = "1"
+    $mplCacheDir = Join-Path $script:DataRoot 'mplcache'
+    if (-not (Test-Path -LiteralPath $mplCacheDir)) {
+        try { New-Item -ItemType Directory -Path $mplCacheDir -Force | Out-Null } catch { }
+    }
+    $psi.EnvironmentVariables["MPLCONFIGDIR"] = $mplCacheDir
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
 
@@ -2200,11 +2230,64 @@ if (Test-Path -LiteralPath $startupConfigPath) {
     $startupLoaded = $false
 }
 
+# =============================================================================
+# STARTUP MIGRATION — configs written by the old admin-installed builds point
+# the venv (and sometimes the bootstrap runtimes) into Program Files, where a
+# normal user can't write: every pip install/repair and venv rebuild there
+# dies with Access Denied. Repoint such paths at their per-user homes and,
+# if the per-user venv doesn't exist yet, route the user to the existing
+# Settings-tab rebuild (Create Venv + Install Packages — the same hardened
+# pinned-versions + smoke-test bootstrap; deliberately NOT a second bootstrap
+# path). Copy-forward only: the old Program Files venv is never touched.
+# =============================================================================
+$startupNeedsVenvRebuild = $false
+if ($startupLoaded) {
+    $cfgChanged = $false
+    if ((Test-UnderProgramFiles ([string]$script:Config.paths.venv_dir)) -or
+        (Test-UnderProgramFiles ([string]$script:Config.paths.python_exe))) {
+        $newVenvDir = Join-Path $script:DataRoot 'venv'
+        $script:Config.paths.venv_dir   = $newVenvDir
+        $script:Config.paths.python_exe = Join-Path $newVenvDir 'Scripts\python.exe'
+        $cfgChanged = $true
+    }
+    # Bootstrap interpreter / JRE saved under a Program Files install that is
+    # gone (or was never this user's to read) — repoint at THIS install's
+    # bundled copies. Left alone when the old path still resolves: reading
+    # from an orphaned Program Files install needs no elevation.
+    $cfgSysPy = [string]$script:Config.paths.system_python_exe
+    if ((Test-UnderProgramFiles $cfgSysPy) -and -not (Test-Path -LiteralPath $cfgSysPy)) {
+        $script:Config.paths.system_python_exe = Join-Path $script:AppRoot 'python-runtime\python.exe'
+        $cfgChanged = $true
+    }
+    $cfgJavaHome = [string]$script:Config.environment.java_home
+    if ((Test-UnderProgramFiles $cfgJavaHome) -and -not (Test-Path -LiteralPath (Join-Path $cfgJavaHome 'bin\java.exe'))) {
+        $script:Config.environment.java_home = Join-Path $script:AppRoot 'java-runtime'
+        $cfgChanged = $true
+    }
+    if ($cfgChanged -and -not (Test-Path -LiteralPath ([string]$script:Config.paths.python_exe))) {
+        $script:Config.environment.venv_created       = $false
+        $script:Config.environment.packages_installed = $false
+        $startupNeedsVenvRebuild = $true
+    }
+    if ($cfgChanged) {
+        try { Save-ProjectConfig } catch { }
+    }
+}
+
 Refresh-UIFromConfig
 Refresh-StagesGrid
 Refresh-OutputsTree
 Refresh-SettingsFromConfig
 Set-ProjectLoadedState -Loaded $startupLoaded
+
+if ($startupNeedsVenvRebuild) {
+    $tabs.SelectedTab = $tabSettings
+    [System.Windows.Forms.MessageBox]::Show(
+        "This project's Python environment pointed into Program Files, which the app can no longer use (it now runs entirely without administrator rights).`n`nThe config has been updated to a per-user location:`n$($script:Config.paths.venv_dir)`n`nOn the Settings tab, click Create Venv and then Install Packages to rebuild it there. Nothing else about the project was changed.",
+        'One-Time Environment Migration',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+}
 
 # =============================================================================
 # LAUNCH
