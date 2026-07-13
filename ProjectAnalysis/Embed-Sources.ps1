@@ -7,10 +7,11 @@
 .DESCRIPTION
   PA-Pipeline-Setup.cs embeds PA-Pipeline.ps1 and the 9 stage scripts as
   frozen base64 string constants so the compiled installer has zero external
-  file dependencies for those. Re-running Build-Setup.bat alone does NOT
-  pick up edits to the .ps1 or any .py file - the embedding is a separate
-  step, and this script IS that step. Run this whenever PA-Pipeline.ps1 or a
-  stage script changes, before rebuilding the installer.
+  file dependencies for those. The embedding is a separate step from the
+  compile, and this script IS that step. Build-Setup.bat now runs it
+  automatically before every compile (its step 2), so a rebuild can no longer
+  silently ship stale embedded sources; running it standalone is still fine
+  when you only want to refresh the .cs without building.
 
   The bundled CPython installer (~26MB) and Java runtime (~47MB) are NOT
   embedded as base64 string constants like the other files - a real test

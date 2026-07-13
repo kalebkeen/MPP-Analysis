@@ -30,8 +30,8 @@
     "baseline_mpp":       "",                    // When schedule.baseline_basis='baseline_file', names the ONE exported file (full path or bare name) whose saved baseline becomes the plan of record for EVERY task; ignored for basis 'original'/'current'
     "prior_brief":        "",                    // Optional: prior run's stage_j/narrative.json — enables the what-changed dashboard element
     "output_dir":         "C:\\SCI\\Projects\\Harrison\\Analysis",    // Root output folder — all stage subdirs created here
-    "venv_dir":           "C:\\Program Files\\PA-Pipeline\\venv",     // Managed venv — written by installer, read-only in config
-    "python_exe":         "C:\\Program Files\\PA-Pipeline\\venv\\Scripts\\python.exe" // Resolved venv python — set by installer
+    "venv_dir":           "C:\\Users\\<user>\\AppData\\Local\\PA-Pipeline\\venv",     // Managed venv — per-user (%LocalAppData%), NEVER Program Files: pip/rebuild must work without admin rights
+    "python_exe":         "C:\\Users\\<user>\\AppData\\Local\\PA-Pipeline\\venv\\Scripts\\python.exe" // Resolved venv python — set by installer; app migrates legacy Program Files values at startup
   },
 
   // ----------------------------------------------------------
